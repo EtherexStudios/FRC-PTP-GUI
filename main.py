@@ -1,8 +1,8 @@
 import sys
-from PySide6.QtWidgets import QApplication, QMainWindow
-from ui.main_window import MainWindow
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow  # Import your class
 
 app = QApplication(sys.argv)
-window = MainWindow()
+window = MainWindow()  # Use custom class
 window.show()
 sys.exit(app.exec())
