@@ -52,24 +52,48 @@ class Sidebar(QWidget):
         self.y_spin.setRange(0,10)
         layout.addRow("Y (m):", self.y_spin)
 
-        self.vel_spin = QDoubleSpinBox()
-        self.vel_spin.setRange(0,10)
-        layout.addRow("Max Velocity:", self.vel_spin)
-
         self.points_list.itemSelectionChanged.connect(self.on_item_selected)
         self.points_list.reordered.connect(self.on_points_list_reordered)
 
+        self.type_combo.currentTextChanged.connect(self.on_type_change)
+        self.x_spin.valueChanged.connect(self.on_x_change)
+        self.y_spin.valueChanged.connect(self.on_y_change)
+
         self.rebuild_points_list()
-        
-    def on_item_selected(self):
+    
+    def get_selected_index(self):
         selected = self.points_list.selectedItems()
         if selected:
-            # Dummy load (later from model)
-            self.type_combo.setCurrentText('translation')
-            self.x_spin.setValue(1.0)
-            self.y_spin.setValue(2.0)
-            self.vel_spin.setValue(4.5)
-            print("Selected item:", selected[0].text())
+            return selected[0].data(Qt.UserRole)
+        else:
+            return -1
+        
+    def on_item_selected(self):
+        index = self.get_selected_index()
+        if index >= 0:
+            point = self.model.get_point(index)
+            self.type_combo.setCurrentText(point['type'])
+            self.x_spin.setValue(point['x'])
+            self.y_spin.setValue(point['y'])
+
+    def on_type_change(self, value):
+        index = self.get_selected_index()
+        if index >= 0:
+            self.model.update_point(index, 'type', value)
+            item = self.points_list.currentItem()
+            item.setText(f"{value} {index+1}")
+
+    def on_x_change(self, value):
+        index = self.get_selected_index()
+        if index >= 0:
+            self.model.update_point(index, 'x', value)
+            print("Updated x to", value)
+
+    def on_y_change(self, value):
+        index = self.get_selected_index()
+        if index >= 0:
+            self.model.update_point(index, 'y', value)
+            print("Updated y to", value)
 
     def rebuild_points_list(self):
         self.points_list.clear()

@@ -7,6 +7,9 @@ class PathModel:
     def get_points(self):
         return copy.deepcopy(self.__points)
     
+    def get_point(self, index):
+        return copy.deepcopy(self.__points[index])
+
     def set_points(self, new_points):
         self.__points = copy.deepcopy(new_points)
 
