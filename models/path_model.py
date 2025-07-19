@@ -1,29 +1,58 @@
-import copy
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Optional
+from abc import ABC
 
-class PathModel:
-    def __init__(self):
-        self.__points = []
-    
-    def get_points(self):
-        return copy.deepcopy(self.__points)
-    
-    def get_point(self, index):
-        return copy.deepcopy(self.__points[index])
+@dataclass
+class Translation2d:
+    x : float
+    y : float
 
-    def set_points(self, new_points):
-        self.__points = copy.deepcopy(new_points)
+@dataclass
+class Rotation2d:
+    radians : float
 
-    def add_point(self, x, y, point_type='translation'):
-        self.__points.append({'x' : x, 'y' : y, 'type' : point_type, 'params' : {} })
-    
-    def update_point(self, index, key, value):
-        if 0 <= index < len(self.__points):
-            if key in ['x', 'y', 'type']:
-                self.__points[index][key] = value
-            else:
-                self.__points[index]['params'][key] = value
+class PathElement(ABC):
+    pass
 
-    def reorder_points(self, new_order):
-        if len(new_order) != len(self.__points):
-            raise ValueError("New order must match points length")
-        self.__points = [self.__points[i] for i in new_order]
+@dataclass
+class TranslationTarget(PathElement):
+    translation : Translation2d
+    final_velocity_meters_per_sec : Optional[float] = None
+    max_velocity_meters_per_sec : Optional[float] = None
+    max_acceleration_meters_per_sec2 : Optional[float] = None
+    intermediate_handoff_radius_meters : Optional[float] = None
+
+@dataclass
+class RotationTarget(PathElement):
+    rotation : Rotation2d
+    translation : Translation2d
+    max_velocity_rad_per_sec : Optional[float] = None
+    max_acceleration_rad_per_sec2 : Optional[float] = None
+
+@dataclass
+class Waypoint(PathElement):
+    rotation_target : Rotation2d
+    translation_target : Translation2d
+
+@dataclass
+class Path:
+    path_elements : List[PathElement] = field(default_factory=list)
+
+    def get_element(self, index: int) -> PathElement:
+        if 0 <= index < len(self.path_elements):
+            return self.path_elements[index]
+        raise IndexError("Index out of range")
+
+    def update_element(self, index: int, key: str, value: any):
+        element = self.get_element(index)
+        if hasattr(element, key):
+            setattr(element, key, value)
+        else:
+            # Assume optional params are in a dict if added later; for now, direct attr
+            pass  # Add logic for optional if needed
+
+    def reorder_elements(self, new_order: List[int]):
+        if len(new_order) != len(self.path_elements):
+            raise ValueError("New order must match elements length")
+        self.path_elements = [self.path_elements[i] for i in new_order]
