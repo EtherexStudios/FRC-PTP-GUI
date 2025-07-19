@@ -44,14 +44,6 @@ class Path:
             return self.path_elements[index]
         raise IndexError("Index out of range")
 
-    def update_element(self, index: int, key: str, value: any):
-        element = self.get_element(index)
-        if hasattr(element, key):
-            setattr(element, key, value)
-        else:
-            # Assume optional params are in a dict if added later; for now, direct attr
-            pass  # Add logic for optional if needed
-
     def reorder_elements(self, new_order: List[int]):
         if len(new_order) != len(self.path_elements):
             raise ValueError("New order must match elements length")

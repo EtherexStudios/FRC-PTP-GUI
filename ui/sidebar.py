@@ -132,7 +132,7 @@ class Sidebar(QWidget):
         if selected:
             return selected[0].data(Qt.UserRole)
         else:
-            return -1
+            return None
     
     def expose_translation_element(self, element):
         if element.translation.x is not None:
@@ -216,56 +216,132 @@ class Sidebar(QWidget):
             self.expose_waypoint_element(element)
 
     def on_type_change(self, value):
-        index = self.get_selected_index()
-        if index >= 0 and self.path:
-            self.path.update_point(index, 'type', value)
+        idx = self.get_selected_index()
+        if idx is not None and self.path is not None:
+            prev = self.path.get_element(idx)
+            # Only change if type is different
+            prev_type = (
+                'translation' if isinstance(prev, TranslationTarget)
+                else 'rotation' if isinstance(prev, RotationTarget)
+                else 'waypoint' if isinstance(prev, Waypoint)
+                else None
+            )
+            if prev_type == value:
+                return
+
+            # Transfer attributes
+            if value == 'translation':
+                new_elem = TranslationTarget(
+                    translation=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0))),
+                    final_velocity_meters_per_sec=getattr(prev, 'final_velocity_meters_per_sec', getattr(prev, 'max_velocity_meters_per_sec', None)),
+                    max_velocity_meters_per_sec=getattr(prev, 'max_velocity_meters_per_sec', None),
+                    max_acceleration_meters_per_sec2=getattr(prev, 'max_acceleration_meters_per_sec2', None),
+                    intermediate_handoff_radius_meters=getattr(prev, 'intermediate_handoff_radius_meters', None)
+                )
+            elif value == 'rotation':
+                new_elem = RotationTarget(
+                    rotation=getattr(prev, 'rotation', getattr(prev, 'rotation_target', Rotation2d(0))),
+                    translation=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0))),
+                    max_velocity_rad_per_sec=getattr(prev, 'max_velocity_rad_per_sec', None),
+                    max_acceleration_rad_per_sec2=getattr(prev, 'max_acceleration_rad_per_sec2', None)
+                )
+            elif value == 'waypoint':
+                new_elem = Waypoint(
+                    rotation_target=getattr(prev, 'rotation', getattr(prev, 'rotation_target', Rotation2d(0))),
+                    translation_target=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0)))
+                )
+            else:
+                return
+
+            self.path.path_elements[idx] = new_elem
             item = self.points_list.currentItem()
-            item.setText(f"{value} {index+1}")
+            item.setText(f"{value} {idx+1}")
+            self.on_item_selected()  # Refresh fields
 
     def on_x_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'translation', Translation2d(value, self.y_spin.value()))
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget) or isinstance(element, RotationTarget):
+                # Update translation.x directly, keep y unchanged
+                element.translation.x = value
+            elif isinstance(element, Waypoint):
+                # Update translation_target.x directly, keep y unchanged
+                element.translation_target.x = value
 
     def on_y_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'translation', Translation2d(self.x_spin.value(), value))
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget) or isinstance(element, RotationTarget):
+                # Update translation.x directly, keep y unchanged
+                element.translation.y = value
+            elif isinstance(element, Waypoint):
+                # Update translation_target.x directly, keep y unchanged
+                element.translation_target.y = value
 
     def on_final_velocity_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'final_velocity_meters_per_sec', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget):
+                element.final_velocity_meters_per_sec = value
+            elif isinstance(element, Waypoint):
+                element.translation_target.final_velocity_meters_per_sec = value
 
     def on_max_velocity_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'max_velocity_meters_per_sec', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget):
+                element.max_velocity_meters_per_sec = value
+            elif isinstance(element, Waypoint):
+                element.translation_target.max_velocity_meters_per_sec = value
 
     def on_max_accel_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'max_acceleration_meters_per_sec2', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget):
+                element.max_acceleration_meters_per_sec2 = value
+            elif isinstance(element, Waypoint):
+                element.translation_target.max_acceleration_meters_per_sec2 = value
 
     def on_handoff_radius_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'intermediate_handoff_radius_meters', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, TranslationTarget):
+                element.intermediate_handoff_radius_meters = value
+            elif isinstance(element, Waypoint):
+                element.translation_target.intermediate_handoff_radius_meters = value
 
     def on_rotation_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'rotation', Rotation2d(value))
+            element = self.path.get_element(idx)
+            if isinstance(element, RotationTarget):
+                element.rotation.radians = value
+            elif isinstance(element, Waypoint):
+                element.rotation_target.radians = value
 
     def on_max_rot_velocity_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'max_velocity_rad_per_sec', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, RotationTarget):
+                element.max_velocity_rad_per_sec = value
+            elif isinstance(element, Waypoint):
+                element.rotation_target.max_velocity_rad_per_sec = value
 
     def on_max_rot_accel_change(self, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'max_acceleration_rad_per_sec2', value)
+            element = self.path.get_element(idx)
+            if isinstance(element, RotationTarget):
+                element.max_acceleration_rad_per_sec2 = value
+            elif isinstance(element, Waypoint):
+                element.rotation_target.max_acceleration_rad_per_sec2 = value
 
     def on_waypoint_rotation_change(self, value):
         idx = self.get_selected_index()
