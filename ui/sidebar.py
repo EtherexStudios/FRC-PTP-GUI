@@ -3,6 +3,12 @@ from PySide6.QtWidgets import QListWidget, QListWidgetItem
 from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint, Translation2d, Rotation2d
 from PySide6.QtCore import Qt
 from PySide6.QtCore import Signal
+from enum import Enum
+
+class ElementType(Enum):
+    TRANSLATION = 'translation'
+    ROTATION = 'rotation'
+    WAYPOINT = 'waypoint'
 
 class CustomList(QListWidget):  # Changed to QListWidget    
     reordered = Signal()  # Move Signal definition here (class-level)
@@ -23,18 +29,18 @@ class CustomList(QListWidget):  # Changed to QListWidget
         for i in range(self.count()):  # Changed to count() for QListWidget
             item = self.item(i)  # Changed to item(i)
             item.setData(Qt.UserRole, i)  # No column
-            item.setText(f"{item.text().split()[0]} {i+1}")
+            item.setText(f"{item.text().split()[0]}")
 
     
 class Sidebar(QWidget):
-    def __init__(self):
+    def __init__(self, path=Path()):
         super().__init__()  # Parent init
         layout = QFormLayout(self)  # Form layout (label + input pairs)
 
         label = QLabel("Path Elements")  # Add this for QListWidget, or optional for QTreeWidget
         layout.addWidget(label)
 
-        self.path = None
+        self.path = path
         
         self.points_list = CustomList()  # Changed to CustomList
         layout.addWidget(self.points_list)  # No header—add QLabel("Path Elements") above if needed
@@ -43,7 +49,7 @@ class Sidebar(QWidget):
         self.labels = {}
      
         self.type_combo = QComboBox()
-        self.type_combo.addItems(['translation', 'waypoint', 'rotation'])
+        self.type_combo.addItems([e.value for e in ElementType])
         type_label = QLabel("Type:")
         layout.addRow(type_label, self.type_combo)
         self.labels[self.type_combo] = type_label
@@ -108,13 +114,14 @@ class Sidebar(QWidget):
         self.type_combo.currentTextChanged.connect(self.on_type_change)
         self.x_spin.valueChanged.connect(self.on_x_change)
         self.y_spin.valueChanged.connect(self.on_y_change)
-        self.final_velocity_spin.valueChanged.connect(self.on_final_velocity_change)
-        self.max_velocity_spin.valueChanged.connect(self.on_max_velocity_change)
-        self.max_accel_spin.valueChanged.connect(self.on_max_accel_change)
-        self.handoff_radius_spin.valueChanged.connect(self.on_handoff_radius_change)
-        self.rotation_spin.valueChanged.connect(self.on_rotation_change)
-        self.max_rot_velocity_spin.valueChanged.connect(self.on_max_rot_velocity_change)
-        self.max_rot_accel_spin.valueChanged.connect(self.on_max_rot_accel_change)
+
+        self.final_velocity_spin.valueChanged.connect(lambda v: self.on_attribute_change('final_velocity_meters_per_sec', v))
+        self.max_velocity_spin.valueChanged.connect(lambda v: self.on_attribute_change('max_velocity_meters_per_sec', v))
+        self.max_accel_spin.valueChanged.connect(lambda v: self.on_attribute_change('max_acceleration_meters_per_sec2', v))  # Fixed typo
+        self.handoff_radius_spin.valueChanged.connect(lambda v: self.on_attribute_change('intermediate_handoff_radius_meters', v))
+        self.rotation_spin.valueChanged.connect(lambda v: self.on_attribute_change('rotation', Rotation2d(v)))
+        self.max_rot_velocity_spin.valueChanged.connect(lambda v: self.on_attribute_change('max_velocity_rad_per_sec', v))
+        self.max_rot_accel_spin.valueChanged.connect(lambda v: self.on_attribute_change('max_acceleration_rad_s_per_sec2', v))
 
         self.rebuild_points_list()
     
@@ -195,21 +202,21 @@ class Sidebar(QWidget):
         self.hide_spinners()
 
         if isinstance(element, TranslationTarget):
-            self.type_combo.setCurrentText('translation')
+            self.type_combo.setCurrentText(ElementType.TRANSLATION.value)
             self.type_combo.setVisible(True)
             self.labels[self.type_combo].setVisible(True)
 
             self.expose_translation_element(element)
 
         elif isinstance(element, RotationTarget):
-            self.type_combo.setCurrentText('rotation')
+            self.type_combo.setCurrentText(ElementType.ROTATION.value)
             self.type_combo.setVisible(True)
             self.labels[self.type_combo].setVisible(True)
 
             self.expose_rotation_element(element)
 
         elif isinstance(element, Waypoint):
-            self.type_combo.setCurrentText('waypoint')
+            self.type_combo.setCurrentText(ElementType.WAYPOINT.value)
             self.type_combo.setVisible(True)
             self.labels[self.type_combo].setVisible(True)
 
@@ -221,42 +228,72 @@ class Sidebar(QWidget):
             prev = self.path.get_element(idx)
             # Only change if type is different
             prev_type = (
-                'translation' if isinstance(prev, TranslationTarget)
-                else 'rotation' if isinstance(prev, RotationTarget)
-                else 'waypoint' if isinstance(prev, Waypoint)
+                ElementType.TRANSLATION if isinstance(prev, TranslationTarget)
+                else ElementType.ROTATION if isinstance(prev, RotationTarget)
+                else ElementType.WAYPOINT if isinstance(prev, Waypoint)
                 else None
             )
-            if prev_type == value:
+            new_type = ElementType(value)
+            if prev_type == new_type:
                 return
 
-            # Transfer attributes
-            if value == 'translation':
-                new_elem = TranslationTarget(
-                    translation=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0))),
-                    final_velocity_meters_per_sec=getattr(prev, 'final_velocity_meters_per_sec', getattr(prev, 'max_velocity_meters_per_sec', None)),
-                    max_velocity_meters_per_sec=getattr(prev, 'max_velocity_meters_per_sec', None),
-                    max_acceleration_meters_per_sec2=getattr(prev, 'max_acceleration_meters_per_sec2', None),
-                    intermediate_handoff_radius_meters=getattr(prev, 'intermediate_handoff_radius_meters', None)
+            # Gather all attributes from TranslationTarget and RotationTarget
+            translation_attrs = [
+                'translation',
+                'final_velocity_meters_per_sec',
+                'max_velocity_meters_per_sec',
+                'max_acceleration_meters_per_sec2',
+                'intermediate_handoff_radius_meters'
+            ]
+            rotation_attrs = [
+                'rotation',
+                'translation',
+                'max_velocity_rad_per_sec',
+                'max_acceleration_rad_per_sec2'
+            ]
+
+            translation_values = {attr: getattr(prev, attr, None) for attr in translation_attrs}
+            rotation_values = {attr: getattr(prev, attr, None) for attr in rotation_attrs}
+
+            if prev_type == ElementType.WAYPOINT:
+                new_elem = (
+                    prev.translation_target if new_type == ElementType.TRANSLATION
+                    else prev.rotation_target
                 )
-            elif value == 'rotation':
+            elif new_type == ElementType.ROTATION:
                 new_elem = RotationTarget(
-                    rotation=getattr(prev, 'rotation', getattr(prev, 'rotation_target', Rotation2d(0))),
-                    translation=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0))),
-                    max_velocity_rad_per_sec=getattr(prev, 'max_velocity_rad_per_sec', None),
-                    max_acceleration_rad_per_sec2=getattr(prev, 'max_acceleration_rad_per_sec2', None)
+                    rotation_values['rotation'] if rotation_values['rotation'] else Rotation2d(),
+                    rotation_values['translation'] if rotation_values['translation'] else Translation2d(),
+                    rotation_values['max_velocity_rad_per_sec'],
+                    rotation_values['max_acceleration_rad_per_sec2'],
                 )
-            elif value == 'waypoint':
-                new_elem = Waypoint(
-                    rotation_target=getattr(prev, 'rotation', getattr(prev, 'rotation_target', Rotation2d(0))),
-                    translation_target=getattr(prev, 'translation', getattr(prev, 'translation_target', Translation2d(0,0)))
+            elif new_type == ElementType.TRANSLATION:
+                new_elem = TranslationTarget(
+                    translation_values['translation'] if translation_values['translation'] else Translation2d(),
+                    translation_values['final_velocity_meters_per_sec'],
+                    translation_values['max_velocity_meters_per_sec'],
+                    translation_values['max_acceleration_meters_per_sec2'],
+                    translation_values['intermediate_handoff_radius_meters']
                 )
-            else:
-                return
+            elif new_type == ElementType.WAYPOINT:
+                if prev_type == ElementType.TRANSLATION:
+                    new_elem = Waypoint(translation_target=prev)
+                    new_elem.rotation_target.translation = new_elem.translation_target.translation
+
+                else:
+                    new_elem = Waypoint(rotation_target=prev)
+                    new_elem.translation_target.translation = new_elem.rotation_target.translation
 
             self.path.path_elements[idx] = new_elem
             item = self.points_list.currentItem()
-            item.setText(f"{value} {idx+1}")
+            item.setText(f"{new_type.value}")
             self.on_item_selected()  # Refresh fields
+
+    def getattr_deep(obj, path):
+        attrs = path.split('.')
+        for attr in attrs:
+            obj = getattr(obj, attr, None)
+        return obj
 
     def on_x_change(self, value):
         idx = self.get_selected_index()
@@ -267,7 +304,8 @@ class Sidebar(QWidget):
                 element.translation.x = value
             elif isinstance(element, Waypoint):
                 # Update translation_target.x directly, keep y unchanged
-                element.translation_target.x = value
+                element.translation_target.translation.x = value
+                element.rotation_target.translation.x = value
 
     def on_y_change(self, value):
         idx = self.get_selected_index()
@@ -278,98 +316,34 @@ class Sidebar(QWidget):
                 element.translation.y = value
             elif isinstance(element, Waypoint):
                 # Update translation_target.x directly, keep y unchanged
-                element.translation_target.y = value
+                element.translation_target.translation.y = value
+                element.rotation_target.translation.y = value
 
-    def on_final_velocity_change(self, value):
+    def on_attribute_change(self, key, value):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
             element = self.path.get_element(idx)
-            if isinstance(element, TranslationTarget):
-                element.final_velocity_meters_per_sec = value
-            elif isinstance(element, Waypoint):
-                element.translation_target.final_velocity_meters_per_sec = value
-
-    def on_max_velocity_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, TranslationTarget):
-                element.max_velocity_meters_per_sec = value
-            elif isinstance(element, Waypoint):
-                element.translation_target.max_velocity_meters_per_sec = value
-
-    def on_max_accel_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, TranslationTarget):
-                element.max_acceleration_meters_per_sec2 = value
-            elif isinstance(element, Waypoint):
-                element.translation_target.max_acceleration_meters_per_sec2 = value
-
-    def on_handoff_radius_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, TranslationTarget):
-                element.intermediate_handoff_radius_meters = value
-            elif isinstance(element, Waypoint):
-                element.translation_target.intermediate_handoff_radius_meters = value
-
-    def on_rotation_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, RotationTarget):
-                element.rotation.radians = value
-            elif isinstance(element, Waypoint):
-                element.rotation_target.radians = value
-
-    def on_max_rot_velocity_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, RotationTarget):
-                element.max_velocity_rad_per_sec = value
-            elif isinstance(element, Waypoint):
-                element.rotation_target.max_velocity_rad_per_sec = value
-
-    def on_max_rot_accel_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            element = self.path.get_element(idx)
-            if isinstance(element, RotationTarget):
-                element.max_acceleration_rad_per_sec2 = value
-            elif isinstance(element, Waypoint):
-                element.rotation_target.max_acceleration_rad_per_sec2 = value
-
-    def on_waypoint_rotation_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'rotation_target', Rotation2d(value))
-
-    def on_waypoint_x_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'translation_target', Translation2d(value, self.waypoint_y_spin.value()))
-
-    def on_waypoint_y_change(self, value):
-        idx = self.get_selected_index()
-        if idx is not None and self.path is not None:
-            self.path.update_element(idx, 'translation_target', Translation2d(self.waypoint_x_spin.value(), value))
+            if isinstance(element, Waypoint):
+                if hasattr(element.translation_target, key):
+                    setattr(element.translation_target, key, value)
+                if hasattr(element.rotation_target, key):
+                    setattr(element.rotation_target, key, value)
+            elif hasattr(element, key):
+                setattr(element, key, value)
 
     def rebuild_points_list(self):
         self.hide_spinners()
+        self.points_list.clear()
         if (self.path):
-            self.points_list.clear()
             for i, p in enumerate(self.path.path_elements):
-                name = ''
                 if isinstance(p, TranslationTarget):
-                    name = 'Translation Target'
+                    name = ElementType.TRANSLATION.value
                 elif isinstance(p, RotationTarget):
-                    name = 'Rotation Target'
+                    name = ElementType.ROTATION.value
                 elif isinstance(p, Waypoint):
-                    name = 'Waypoint'
+                    name = ElementType.WAYPOINT.value
+                else:
+                    name = "Unknown"
                     
                 item = QListWidgetItem(name)  # Changed to QListWidgetItem, no []
                 item.setData(Qt.UserRole, i)  # No column 0
@@ -380,8 +354,9 @@ class Sidebar(QWidget):
         self.rebuild_points_list()
         
     def on_points_list_reordered(self):
-        if (self.path):
-            new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]  # Changed to item(i), count()
-            self.path.reorder_points(new_order)
+        if self.path is None:
+            return
+        new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]  # Changed to item(i), count()
+        self.path.reorder_elements(new_order)
 
-            print("Model reordered: ", self.path.get_points())
+        print("Model reordered: ", self.path.path_elements)

@@ -5,19 +5,19 @@ from abc import ABC
 
 @dataclass
 class Translation2d:
-    x : float
-    y : float
+    x : float = 0
+    y : float = 0
 
 @dataclass
 class Rotation2d:
-    radians : float
+    radians : float = 0
 
 class PathElement(ABC):
     pass
 
 @dataclass
 class TranslationTarget(PathElement):
-    translation : Translation2d
+    translation : Translation2d = field(default_factory=Translation2d)
     final_velocity_meters_per_sec : Optional[float] = None
     max_velocity_meters_per_sec : Optional[float] = None
     max_acceleration_meters_per_sec2 : Optional[float] = None
@@ -25,15 +25,15 @@ class TranslationTarget(PathElement):
 
 @dataclass
 class RotationTarget(PathElement):
-    rotation : Rotation2d
-    translation : Translation2d
+    rotation : Rotation2d = field(default_factory=Rotation2d)
+    translation : Translation2d = field(default_factory=Translation2d)
     max_velocity_rad_per_sec : Optional[float] = None
     max_acceleration_rad_per_sec2 : Optional[float] = None
 
 @dataclass
 class Waypoint(PathElement):
-    rotation_target : Rotation2d
-    translation_target : Translation2d
+    translation_target : TranslationTarget = field(default_factory=TranslationTarget)
+    rotation_target : RotationTarget = field(default_factory=RotationTarget)
 
 @dataclass
 class Path:
