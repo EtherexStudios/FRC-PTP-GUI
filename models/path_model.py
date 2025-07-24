@@ -3,21 +3,13 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from abc import ABC
 
-@dataclass
-class Translation2d:
-    x : float = 0
-    y : float = 0
-
-@dataclass
-class Rotation2d:
-    radians : float = 0
-
 class PathElement(ABC):
     pass
 
 @dataclass
 class TranslationTarget(PathElement):
-    translation : Translation2d = field(default_factory=Translation2d)
+    x_meters : float = 0
+    y_meters : float = 0
     final_velocity_meters_per_sec : Optional[float] = None
     max_velocity_meters_per_sec : Optional[float] = None
     max_acceleration_meters_per_sec2 : Optional[float] = None
@@ -25,8 +17,9 @@ class TranslationTarget(PathElement):
 
 @dataclass
 class RotationTarget(PathElement):
-    rotation : Rotation2d = field(default_factory=Rotation2d)
-    translation : Translation2d = field(default_factory=Translation2d)
+    rotation_radians : float = 0
+    x_meters : float = 0
+    y_meters : float = 0
     max_velocity_rad_per_sec : Optional[float] = None
     max_acceleration_rad_per_sec2 : Optional[float] = None
 

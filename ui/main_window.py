@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QLabel
 from .sidebar import Sidebar
-from models.path_model import Translation2d, Rotation2d, TranslationTarget, RotationTarget, Waypoint, Path
+from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -11,11 +11,15 @@ class MainWindow(QMainWindow):
         self.path = Path()  # Create model
         # Test add (temporary, remove later)
 
-        self.path.path_elements.append(TranslationTarget(translation=Translation2d(9,10), intermediate_handoff_radius_meters=2))
-        self.path.path_elements.append(TranslationTarget(translation=Translation2d(10,10)))
-        self.path.path_elements.append(TranslationTarget(translation=Translation2d(11,10)))
-        self.path.path_elements.append(Waypoint(translation_target=TranslationTarget(translation=Translation2d(12,21)), rotation_target=RotationTarget(rotation=Rotation2d(1), translation=Translation2d(12,21))))
-
+        self.path.path_elements.append(TranslationTarget(x_meters=9, y_meters=10, intermediate_handoff_radius_meters=2))
+        self.path.path_elements.append(TranslationTarget(x_meters=10, y_meters=10))
+        self.path.path_elements.append(TranslationTarget(x_meters=11, y_meters=10))
+        self.path.path_elements.append(
+            Waypoint(
+                translation_target=TranslationTarget(x_meters=12, y_meters=21),
+                rotation_target=RotationTarget(rotation_radians=1, x_meters=12, y_meters=21)
+            )
+        )
 
         central = QWidget()  # Blank container for content
         self.setCentralWidget(central)
