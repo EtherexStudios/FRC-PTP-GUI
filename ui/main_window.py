@@ -2,7 +2,7 @@ from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget
 import math
 from .sidebar import Sidebar
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
-from .canvas import CanvasView
+from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from PySide6.QtCore import Qt
 
 class MainWindow(QMainWindow):
@@ -13,8 +13,8 @@ class MainWindow(QMainWindow):
 
         self.path = Path()  # Create model
         # Better test path: centered and on-screen with all element types
-        center_x = 16.54 / 2.0  # FIELD_LENGTH_METERS / 2
-        center_y = 8.21 / 2.0   # FIELD_WIDTH_METERS / 2
+        center_x = FIELD_LENGTH_METERS / 2.0
+        center_y = FIELD_WIDTH_METERS / 2.0
 
         self.path.path_elements.extend([
             # Left of center - TranslationTarget
@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
     def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
         if index < 0 or index >= len(self.path.path_elements):
             return
+        # Clamp via sidebar metadata to keep UI and model consistent
+        x_m = Sidebar._clamp_from_metadata('x_meters', float(x_m))
+        y_m = Sidebar._clamp_from_metadata('y_meters', float(y_m))
         elem = self.path.path_elements[index]
         if isinstance(elem, TranslationTarget):
             elem.x_meters = x_m
@@ -82,9 +85,13 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self.path.path_elements):
             return
         elem = self.path.path_elements[index]
+        # Clamp using sidebar metadata (degrees domain), then convert back to radians
+        degrees = math.degrees(radians)
+        degrees = Sidebar._clamp_from_metadata('rotation_degrees', float(degrees))
+        clamped_radians = math.radians(degrees)
         if isinstance(elem, RotationTarget):
-            elem.rotation_radians = radians
+            elem.rotation_radians = clamped_radians
         elif isinstance(elem, Waypoint):
-            elem.rotation_target.rotation_radians = radians
+            elem.rotation_target.rotation_radians = clamped_radians
         # Update sidebar fields
         self.sidebar.update_current_values_only()

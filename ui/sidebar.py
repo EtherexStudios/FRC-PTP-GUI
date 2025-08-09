@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal, QPoint, QSize, QTimer
 from enum import Enum
 import math
 from PySide6.QtGui import QIcon
+from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 
 class ElementType(Enum):
     TRANSLATION = 'translation'
@@ -91,15 +92,15 @@ class Sidebar(QWidget):
     modelStructureChanged = Signal()
     spinner_metadata = {
         # Put rotation first so it appears at the top of Core
-        'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False},
-        'x_meters': {'label': 'X (m)', 'step': 0.05, 'range': (0, 17), 'removable': False},
-        'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0, 9), 'removable': False},
-        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True},
-        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True},
-        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True},
-        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': True}, 
-        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True},
-        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True}
+        'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
+        'x_meters': {'label': 'X (m)', 'step': 0.05, 'range': (0.0, float(FIELD_LENGTH_METERS)), 'removable': False, 'section': 'core'},
+        'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0.0, float(FIELD_WIDTH_METERS)), 'removable': False, 'section': 'core'},
+        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
+        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
+        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'translation_limits'},
+        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': True, 'section': 'translation_limits'}, 
+        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'rotation_limits'},
+        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'rotation_limits'}
     }        
 
     # Map UI spinner keys to model attribute names (for rotation fields in degrees)
@@ -109,15 +110,26 @@ class Sidebar(QWidget):
         'max_acceleration_deg_per_sec2': 'max_acceleration_rad_per_sec2',
     }
 
-    # Human-readable names for optional properties
-    readable_names = {
-        'final_velocity_meters_per_sec': 'Final velocity (m/s)',
-        'max_velocity_meters_per_sec': 'Max velocity (m/s)',
-        'max_acceleration_meters_per_sec2': 'Max acceleration (m/s²)',
-        'intermediate_handoff_radius_meters': 'Handoff radius (m)',
-        'max_velocity_deg_per_sec': 'Max rot velocity (deg/s)',
-        'max_acceleration_deg_per_sec2': 'Max rot acceleration (deg/s²)',
-    }
+    @classmethod
+    def _meta(cls, key: str) -> dict:
+        return cls.spinner_metadata.get(key, {})
+
+    @classmethod
+    def _label(cls, key: str) -> str:
+        meta = cls._meta(key)
+        return meta.get('label', key)
+
+    @classmethod
+    def _clamp_from_metadata(cls, key: str, value: float) -> float:
+        meta = cls._meta(key)
+        value_min, value_max = meta.get('range', (None, None))
+        if value_min is None or value_max is None:
+            return value
+        if value < value_min:
+            return value_min
+        if value > value_max:
+            return value_max
+        return value
 
     def __init__(self, path=Path()):
 
@@ -307,15 +319,15 @@ class Sidebar(QWidget):
             # FIX: capture 'name' as a default argument in the lambda
             spin.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
 
-            # Add to the appropriate section
-            if name in ['x_meters', 'y_meters', 'rotation_degrees']:
+            # Add to the appropriate section based on metadata
+            section = data.get('section', 'core')
+            if section == 'core':
                 self.core_layout.addRow(label, spin_row)
-            elif name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
+            elif section == 'translation_limits':
                 self.translation_limits_layout.addRow(label, spin_row)
-            elif name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+            elif section == 'rotation_limits':
                 self.rotation_limits_layout.addRow(label, spin_row)
             else:
-                # Fallback to core
                 self.core_layout.addRow(label, spin_row)
             self.spinners[name] = (spin, label, btn, spin_row)
 
@@ -373,7 +385,7 @@ class Sidebar(QWidget):
                     spin_row.setVisible(True)
                     return True
                 else:
-                    display = Sidebar.readable_names.get(name, name)
+                    display = Sidebar._label(name)
                     optional_display_items.append(display)
                     self.optional_display_to_key[display] = name
             return False
@@ -401,7 +413,7 @@ class Sidebar(QWidget):
                         spin_row.setVisible(True)
                         return True
                     else:
-                        display = Sidebar.readable_names.get(deg_name, deg_name)
+                        display = Sidebar._label(deg_name)
                         optional_display_items.append(display)
                         self.optional_display_to_key[display] = deg_name
             return False
@@ -434,7 +446,7 @@ class Sidebar(QWidget):
                 if show_attr(element, name):
                     has_translation_limits = True
                 else:
-                    display = Sidebar.readable_names.get(name, name)
+                    display = Sidebar._label(name)
                     optional_display_items.append(display)
                     self.optional_display_to_key[display] = name
         elif isinstance(element, RotationTarget):
@@ -732,11 +744,7 @@ class Sidebar(QWidget):
             self.on_item_selected()  # Refresh fields
             self.modelStructureChanged.emit()
 
-    def getattr_deep(obj, path):
-        attrs = path.split('.')
-        for attr in attrs:
-            obj = getattr(obj, attr, None)
-        return obj
+    # Removed unused getattr_deep helper for cleanliness
 
 
     def on_attribute_change(self, key, value):
@@ -745,7 +753,9 @@ class Sidebar(QWidget):
             element = self.path.get_element(idx)
             if key in Sidebar.degrees_to_radians_attr_map:
                 mapped = Sidebar.degrees_to_radians_attr_map[key]
-                rad_value = math.radians(value)
+                # Clamp using degrees-domain metadata before converting
+                clamped_deg = Sidebar._clamp_from_metadata(key, float(value))
+                rad_value = math.radians(clamped_deg)
                 if isinstance(element, Waypoint):
                     if hasattr(element.rotation_target, mapped):
                         setattr(element.rotation_target, mapped, rad_value)
@@ -754,30 +764,20 @@ class Sidebar(QWidget):
             else:
                 if isinstance(element, Waypoint):
                     if hasattr(element.translation_target, key):
-                        # Clamp within reasonable field bounds
-                        if key == 'x_meters':
-                            value = max(0.0, min(17.0, value))
-                        if key == 'y_meters':
-                            value = max(0.0, min(9.0, value))
-                        setattr(element.translation_target, key, value)
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element.translation_target, key, clamped)
                     if hasattr(element.rotation_target, key):
-                        if key == 'x_meters':
-                            value = max(0.0, min(17.0, value))
-                        if key == 'y_meters':
-                            value = max(0.0, min(9.0, value))
-                        setattr(element.rotation_target, key, value)
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element.rotation_target, key, clamped)
                 elif hasattr(element, key):
-                    if key == 'x_meters':
-                        value = max(0.0, min(17.0, value))
-                    if key == 'y_meters':
-                        value = max(0.0, min(9.0, value))
-                    setattr(element, key, value)
+                    clamped = Sidebar._clamp_from_metadata(key, float(value))
+                    setattr(element, key, clamped)
             self.modelChanged.emit()
 
     def rebuild_points_list(self):
         self.hide_spinners()
         self.points_list.clear()
-        if (self.path):
+        if self.path:
             for i, p in enumerate(self.path.path_elements):
                 if isinstance(p, TranslationTarget):
                     name = ElementType.TRANSLATION.value
@@ -803,7 +803,6 @@ class Sidebar(QWidget):
         new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]  # Changed to item(i), count()
         self.path.reorder_elements(new_order)
 
-        print("Model reordered: ", self.path.path_elements)
         self.modelStructureChanged.emit()
 
     # External API for other widgets
