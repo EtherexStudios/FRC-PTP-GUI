@@ -142,6 +142,17 @@ class Sidebar(QWidget):
         label = QLabel("Path Elements")
         main_layout.addWidget(label)
 
+        # Toolbar for add element
+        self.path_toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(self.path_toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(6)
+        self.add_element_pop = PopupCombobox()
+        self.add_element_pop.setText("Add element")
+        self.add_element_pop.setToolTip("Add a path element at the current selection")
+        toolbar_layout.addWidget(self.add_element_pop)
+        main_layout.addWidget(self.path_toolbar)
+
         self.path = path
         
         self.points_list = CustomList()
@@ -346,6 +357,9 @@ class Sidebar(QWidget):
         self.type_combo.currentTextChanged.connect(self.on_type_change)
 
         self.optional_pop.item_selected.connect(self.on_attribute_added)
+        
+        # Add element dropdown wiring
+        self.add_element_pop.item_selected.connect(self.on_add_element_selected)
         
         self.rebuild_points_list()
     
@@ -605,6 +619,8 @@ class Sidebar(QWidget):
             else:
                 current_type = ElementType.WAYPOINT
             self._rebuild_type_combo_for_index(idx, current_type)
+            # Refresh add-element options based on new selection context
+            self._refresh_add_dropdown_items()
             
             self.type_label.setVisible(True)
             self.type_combo.setVisible(True)
@@ -889,6 +905,8 @@ class Sidebar(QWidget):
     def rebuild_points_list(self):
         self.hide_spinners()
         self.points_list.clear()
+        # Rebuild add-element dropdown items based on selection context
+        self._refresh_add_dropdown_items()
         if self.path:
             for i, p in enumerate(self.path.path_elements):
                 if isinstance(p, TranslationTarget):
@@ -899,10 +917,30 @@ class Sidebar(QWidget):
                     name = ElementType.WAYPOINT.value
                 else:
                     name = "Unknown"
-                    
-                item = QListWidgetItem(name)  # Changed to QListWidgetItem, no []
-                item.setData(Qt.UserRole, i)  # No column 0
-                self.points_list.addItem(item)  # Changed to addItem
+                
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, i)
+                # Build row widget with label and remove button
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(6, 0, 6, 0)
+                row_layout.setSpacing(6)
+                label = QLabel(name)
+                label.setStyleSheet("color: #f0f0f0;")
+                row_layout.addWidget(label)
+                row_layout.addStretch()
+                remove_btn = QPushButton()
+                remove_btn.setIcon(QIcon("assets/remove_icon.png"))
+                remove_btn.setToolTip("Remove element")
+                remove_btn.setFixedSize(18, 18)
+                remove_btn.setIconSize(QSize(14, 14))
+                remove_btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")
+                # Capture current index by default-arg
+                remove_btn.clicked.connect(lambda checked=False, idx_to_remove=i: self._on_remove_element(idx_to_remove))
+                row_layout.addWidget(remove_btn)
+
+                self.points_list.addItem(item)
+                self.points_list.setItemWidget(item, row_widget)
 
     def set_path(self, path: Path):
         self.path = path
@@ -954,3 +992,124 @@ class Sidebar(QWidget):
     def refresh_current_selection(self):
         # Re-run expose for current selection using current model values
         self.on_item_selected()
+
+    # -------------------- Add/Remove elements --------------------
+    def _refresh_add_dropdown_items(self):
+        # Build allowed add types depending on current selection position (edge cannot be rotation)
+        if self.path is None:
+            self.add_element_pop.clear()
+            return
+        insert_pos = self._insert_position_from_selection()
+        # If inserting at edges, rotation is not allowed
+        at_edge = (insert_pos == 0) or (insert_pos == len(self.path.path_elements))
+        items = []
+        if at_edge:
+            items = [ElementType.TRANSLATION.value, ElementType.WAYPOINT.value]
+        else:
+            items = [e.value for e in ElementType]
+        self.add_element_pop.add_items(items)
+
+    def _insert_position_from_selection(self) -> int:
+        # Insert AFTER the selected row; if nothing selected, append at end
+        current_row = self.points_list.currentRow()
+        if current_row < 0:
+            return len(self.path.path_elements) if self.path else 0
+        return current_row + 1
+
+    def on_add_element_selected(self, type_text: str):
+        if self.path is None:
+            return
+        new_type = ElementType(type_text)
+        insert_pos = self._insert_position_from_selection()
+        # Enforce rotation cannot be at start/end
+        if new_type == ElementType.ROTATION:
+            if insert_pos == 0:
+                insert_pos = 1
+            if insert_pos == len(self.path.path_elements):
+                insert_pos = max(0, len(self.path.path_elements) - 1)
+            if len(self.path.path_elements) == 0:
+                # Cannot add rotation as the first element; switch to translation
+                new_type = ElementType.TRANSLATION
+        # Build the new element with sensible defaults
+        def current_pos_defaults() -> Tuple[float, float]:
+            idx = self.get_selected_index()
+            if idx is None or idx < 0 or idx >= len(self.path.path_elements):
+                # Default to center field
+                return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+            e = self.path.path_elements[idx]
+            if isinstance(e, TranslationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            if isinstance(e, Waypoint):
+                return float(e.translation_target.x_meters), float(e.translation_target.y_meters)
+            if isinstance(e, RotationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+        x0, y0 = current_pos_defaults()
+        if new_type == ElementType.TRANSLATION:
+            new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
+        elif new_type == ElementType.WAYPOINT:
+            tt = TranslationTarget(x_meters=x0, y_meters=y0)
+            rt = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+            new_elem = Waypoint(translation_target=tt, rotation_target=rt)
+        else:  # ROTATION
+            new_elem = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+        # Insert and then fix constraints/positions
+        self.path.path_elements.insert(insert_pos, new_elem)
+        # If we inserted a rotation, snap it to midpoint between neighbors
+        if isinstance(new_elem, RotationTarget):
+            mid = self._midpoint_between_neighbors(insert_pos)
+            if mid is not None:
+                mx, my = mid
+                new_elem.x_meters = mx
+                new_elem.y_meters = my
+        # After any insert, ensure rotations are not at ends; if they are, swap inward with nearest non-rotation
+        self._repair_rotation_at_ends()
+        # Reproject rotation positions
+        self._reproject_all_rotation_positions()
+        # Rebuild UI and select newly inserted element (find its new index by identity)
+        identity = id(new_elem)
+        self.rebuild_points_list()
+        new_index = next((i for i, e in enumerate(self.path.path_elements) if id(e) == identity), insert_pos)
+        self.select_index(new_index)
+        self.modelStructureChanged.emit()
+
+    def _on_remove_element(self, idx_to_remove: int):
+        if self.path is None:
+            return
+        if idx_to_remove < 0 or idx_to_remove >= len(self.path.path_elements):
+            return
+        removed = self.path.path_elements.pop(idx_to_remove)
+        # After removal, ensure we do not end with rotation at start or end
+        self._repair_rotation_at_ends()
+        # If list has only rotations (edge case), convert first to translation
+        if self.path.path_elements and all(isinstance(e, RotationTarget) for e in self.path.path_elements):
+            first = self.path.path_elements[0]
+            self.path.path_elements[0] = TranslationTarget(
+                x_meters=getattr(first, 'x_meters', 0.0),
+                y_meters=getattr(first, 'y_meters', 0.0)
+            )
+        # Reproject post-change
+        self._reproject_all_rotation_positions()
+        # Rebuild list and update selection sensibly
+        self.rebuild_points_list()
+        # Select previous index or last available
+        if self.path.path_elements:
+            new_sel = min(idx_to_remove, len(self.path.path_elements) - 1)
+            self.select_index(new_sel)
+        self.modelStructureChanged.emit()
+
+    def _repair_rotation_at_ends(self):
+        # Ensure first and last elements are not RotationTarget; if they are, swap with nearest non-rotation
+        if self.path is None or not self.path.path_elements:
+            return
+        elems = self.path.path_elements
+        # Repair start
+        if isinstance(elems[0], RotationTarget):
+            swap_idx = next((i for i, e in enumerate(elems) if not isinstance(e, RotationTarget)), None)
+            if swap_idx is not None and swap_idx != 0:
+                elems[0], elems[swap_idx] = elems[swap_idx], elems[0]
+        # Repair end
+        if elems and isinstance(elems[-1], RotationTarget):
+            swap_idx = next((len(elems) - 1 - i for i, e in enumerate(reversed(elems)) if not isinstance(e, RotationTarget)), None)
+            if swap_idx is not None and swap_idx != len(elems) - 1:
+                elems[-1], elems[swap_idx] = elems[swap_idx], elems[-1]
