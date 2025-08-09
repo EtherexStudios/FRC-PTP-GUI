@@ -35,19 +35,27 @@ class DraggablePointItem(QGraphicsEllipseItem):
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
             new_pos: QPointF = value
-            # Clamp in scene coordinates to keep within field
-            cx, cy = self.canvas_view._clamp_scene_coords(new_pos.x(), new_pos.y())
+            # Constrain movement based on element type and neighbors
+            cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
             # Return clamped value; actual updates occur after the position is committed
             return QPointF(cx, cy)
         elif change == QGraphicsItem.ItemPositionHasChanged:
             # Now that the item's position is committed, notify for visual updates and model sync
-            x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
-            self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+            if not getattr(self.canvas_view, "_suppress_live_events", False):
+                x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+                self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
+        # Prepare for potential drag
+        self.canvas_view._on_item_pressed(self.index_in_model)
         self.canvas_view._on_item_clicked(self.index_in_model)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Clear any drag state
+        self.canvas_view._on_item_released(self.index_in_model)
+        super().mouseReleaseEvent(event)
 
 
 class RotationHandle(QGraphicsEllipseItem):
@@ -61,6 +69,8 @@ class RotationHandle(QGraphicsEllipseItem):
         self.setPen(QPen(QColor("#222222"), 0.02))
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        # Ensure the handle itself is not selectable to avoid multi-item moves
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
         self.setZValue(12)
         self._angle_radians: float = 0.0
         self.link_line = QGraphicsLineItem()
@@ -109,6 +119,17 @@ class RotationHandle(QGraphicsEllipseItem):
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
+        # On rotation start, select the associated center item and clear any previous selection
+        # This prevents previously-selected items from being dragged inadvertently
+        try:
+            if self.canvas_view and self.canvas_view.graphics_scene:
+                self.canvas_view.graphics_scene.clearSelection()
+            if self.center_item:
+                self.center_item.setSelected(True)
+                # Notify outside listeners of selection change (sidebar, etc.)
+                self.canvas_view._on_item_clicked(self.center_item.index_in_model)
+        except Exception:
+            pass
         # Prevent center item from moving while rotating
         self.center_item.setFlag(QGraphicsItem.ItemIsMovable, False)
         super().mousePressEvent(event)
@@ -134,6 +155,11 @@ class CanvasView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
         self._is_fitting = False
+        # Guard to avoid emitting elementMoved while performing programmatic updates
+        self._suppress_live_events: bool = False
+        # Cache of rotation t parameters during an anchor drag (index -> t in [0,1])
+        self._rotation_t_cache: Optional[dict[int, float]] = None
+        self._anchor_drag_in_progress: bool = False
 
         self.graphics_scene = QGraphicsScene(self)
         self.setScene(self.graphics_scene)
@@ -169,7 +195,26 @@ class CanvasView(QGraphicsView):
         # Update item positions and angles from model without rebuilding structure
         if self._path is None:
             return
+        self._suppress_live_events = True
+        try:
+            for i, (kind, item, handle) in enumerate(self._items):
+                element = self._path.path_elements[i]
+                pos = self._element_position(element)
+                item.set_center(QPointF(pos[0], pos[1]))
+                if handle is not None:
+                    angle = self._element_rotation(element)
+                    handle.set_angle(angle)
+        finally:
+            self._suppress_live_events = False
+        self._update_connecting_lines()
+
+    def refresh_rotations_from_model(self):
+        # Update only rotation items from the model
+        if self._path is None:
+            return
         for i, (kind, item, handle) in enumerate(self._items):
+            if kind != 'rotation':
+                continue
             element = self._path.path_elements[i]
             pos = self._element_position(element)
             item.set_center(QPointF(pos[0], pos[1]))
@@ -302,7 +347,11 @@ class CanvasView(QGraphicsView):
         kind, _, handle = self._items[index]
         if handle is not None:
             handle.sync_to_angle()
+        # Emit move for the item being dragged first so model updates promptly
         self.elementMoved.emit(index, x_m, y_m)
+        # If an anchor moved, reproject any rotation items so they stay inline in real-time
+        if kind in ('translation', 'waypoint'):
+            self._reproject_rotation_items_in_scene()
 
     def _on_item_live_rotated(self, index: int, angle_radians: float):
         self.elementRotated.emit(index, angle_radians)
@@ -321,5 +370,136 @@ class CanvasView(QGraphicsView):
         min_x, min_y = 0.0, 0.0
         max_x, max_y = FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
         return max(min_x, min(x_s, max_x)), max(min_y, min(y_s, max_y))
+
+    def _constrain_scene_coords_for_index(self, index: int, x_s: float, y_s: float) -> Tuple[float, float]:
+        # Default clamp to field bounds
+        x_s, y_s = self._clamp_scene_coords(x_s, y_s)
+        if index < 0 or index >= len(self._items):
+            return x_s, y_s
+        kind, _, _ = self._items[index]
+        # Only constrain rotation elements along line segment between nearest translation/waypoint neighbors
+        if kind != 'rotation':
+            return x_s, y_s
+        prev_pos, next_pos = self._find_neighbor_item_positions(index)
+        if prev_pos is None or next_pos is None:
+            return x_s, y_s
+        ax, ay = prev_pos
+        bx, by = next_pos
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 0.0:
+            return x_s, y_s
+        t = ((x_s - ax) * dx + (y_s - ay) * dy) / denom
+        # Clamp to segment
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        # Ensure still inside field bounds
+        return self._clamp_scene_coords(proj_x, proj_y)
+
+    def _find_neighbor_item_positions(self, index: int) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        # Search upward for nearest translation/waypoint
+        prev_pos: Optional[Tuple[float, float]] = None
+        for i in range(index - 1, -1, -1):
+            kind, item, _ = self._items[i]
+            if kind in ('translation', 'waypoint'):
+                prev_pos = (item.pos().x(), item.pos().y())
+                break
+        next_pos: Optional[Tuple[float, float]] = None
+        for i in range(index + 1, len(self._items)):
+            kind, item, _ = self._items[i]
+            if kind in ('translation', 'waypoint'):
+                next_pos = (item.pos().x(), item.pos().y())
+                break
+        return prev_pos, next_pos
+
+    def _reproject_rotation_items_in_scene(self):
+        # Adjust rotation items to lie on the segment between their current visible neighbors
+        # Maintain the initial t ratio along the segment during an anchor drag
+        self._suppress_live_events = True
+        try:
+            for i, (kind, item, handle) in enumerate(self._items):
+                if kind != 'rotation':
+                    continue
+                prev_pos, next_pos = self._find_neighbor_item_positions(i)
+                if prev_pos is None or next_pos is None:
+                    continue
+                ax, ay = prev_pos
+                bx, by = next_pos
+                dx = bx - ax
+                dy = by - ay
+                denom = dx * dx + dy * dy
+                if denom <= 0.0:
+                    continue
+                # Use cached t if available to maintain ratio; otherwise compute from current position
+                if self._rotation_t_cache is not None and i in self._rotation_t_cache:
+                    t = self._rotation_t_cache[i]
+                else:
+                    rx, ry = item.pos().x(), item.pos().y()
+                    t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                proj_x = ax + t * dx
+                proj_y = ay + t * dy
+                # Move without emitting signals
+                item.setPos(proj_x, proj_y)
+                if handle is not None:
+                    handle.sync_to_angle()
+            # Update connecting lines once after all moves
+            self._update_connecting_lines()
+        finally:
+            self._suppress_live_events = False
+
+    def _compute_rotation_t_cache(self) -> dict[int, float]:
+        t_by_index: dict[int, float] = {}
+        for i, (kind, item, _) in enumerate(self._items):
+            if kind != 'rotation':
+                continue
+            prev_pos, next_pos = self._find_neighbor_item_positions(i)
+            if prev_pos is None or next_pos is None:
+                continue
+            ax, ay = prev_pos
+            bx, by = next_pos
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom <= 0.0:
+                continue
+            rx, ry = item.pos().x(), item.pos().y()
+            t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            t_by_index[i] = float(t)
+        return t_by_index
+
+    def _on_item_pressed(self, index: int):
+        # If an anchor is pressed, record current t for rotation items
+        if index < 0 or index >= len(self._items):
+            return
+        kind, _, _ = self._items[index]
+        if kind in ('translation', 'waypoint'):
+            self._anchor_drag_in_progress = True
+            self._rotation_t_cache = self._compute_rotation_t_cache()
+
+    def _on_item_released(self, index: int):
+        # If an anchor drag just finished, commit current rotation positions to the model
+        if self._anchor_drag_in_progress:
+            try:
+                for i, (kind, item, _) in enumerate(self._items):
+                    if kind != 'rotation':
+                        continue
+                    mx, my = self._model_from_scene(item.pos().x(), item.pos().y())
+                    self.elementMoved.emit(i, mx, my)
+            finally:
+                self._anchor_drag_in_progress = False
+                self._rotation_t_cache = None
 
 

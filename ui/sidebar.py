@@ -4,6 +4,7 @@ from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
 from PySide6.QtCore import Qt
 from PySide6.QtCore import Signal, QPoint, QSize, QTimer
 from enum import Enum
+from typing import Optional, Tuple
 import math
 from PySide6.QtGui import QIcon
 from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
@@ -340,6 +341,7 @@ class Sidebar(QWidget):
         
         self.points_list.itemSelectionChanged.connect(self.on_item_selected)
         self.points_list.reordered.connect(self.on_points_list_reordered)
+        # Additional guard: prevent dragging rotation to start or end by enforcing after drop
 
         self.type_combo.currentTextChanged.connect(self.on_type_change)
 
@@ -597,11 +599,12 @@ class Sidebar(QWidget):
             self.expose_element(element)
             # expose combo box
             if isinstance(element, TranslationTarget):
-                self.type_combo.setCurrentText(ElementType.TRANSLATION.value)
+                current_type = ElementType.TRANSLATION
             elif isinstance(element, RotationTarget):
-                self.type_combo.setCurrentText(ElementType.ROTATION.value)
+                current_type = ElementType.ROTATION
             else:
-                self.type_combo.setCurrentText(ElementType.WAYPOINT.value)
+                current_type = ElementType.WAYPOINT
+            self._rebuild_type_combo_for_index(idx, current_type)
             
             self.type_label.setVisible(True)
             self.type_combo.setVisible(True)
@@ -683,6 +686,12 @@ class Sidebar(QWidget):
                 else None
             )
             new_type = ElementType(value)
+            # Prevent creating rotation at ends unless the current element already is rotation
+            if new_type == ElementType.ROTATION and prev_type != ElementType.ROTATION:
+                if idx == 0 or idx == len(self.path.path_elements) - 1:
+                    # Disallowed; restore UI selection
+                    self._rebuild_type_combo_for_index(idx, prev_type)
+                    return
             if prev_type == new_type:
                 return
 
@@ -738,11 +747,97 @@ class Sidebar(QWidget):
                     new_elem.translation_target.x_meters = new_elem.rotation_target.x_meters
                     new_elem.translation_target.y_meters = new_elem.rotation_target.y_meters
 
+            # If we have just created or switched to a rotation element, snap its x/y to midpoint
+            if new_type == ElementType.ROTATION:
+                mid = self._midpoint_between_neighbors(idx)
+                if mid is not None:
+                    mx, my = mid
+                    new_elem.x_meters = mx
+                    new_elem.y_meters = my
+
             self.path.path_elements[idx] = new_elem
             item = self.points_list.currentItem()
             item.setText(f"{new_type.value}")
             self.on_item_selected()  # Refresh fields
             self.modelStructureChanged.emit()
+
+    def _rebuild_type_combo_for_index(self, idx: int, current_type: ElementType):
+        if self.path is None:
+            return
+        is_end = (idx == 0 or idx == len(self.path.path_elements) - 1)
+        allowed = [e.value for e in ElementType]
+        if is_end and current_type != ElementType.ROTATION:
+            allowed = [ElementType.TRANSLATION.value, ElementType.WAYPOINT.value]
+        try:
+            self.type_combo.blockSignals(True)
+            self.type_combo.clear()
+            self.type_combo.addItems(allowed)
+            self.type_combo.setCurrentText(current_type.value)
+        finally:
+            self.type_combo.blockSignals(False)
+
+    def _neighbor_positions_model(self, idx: int) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        if self.path is None:
+            return None, None
+        # prev
+        prev_pos = None
+        for i in range(idx - 1, -1, -1):
+            e = self.path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                prev_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                prev_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        # next
+        next_pos = None
+        for i in range(idx + 1, len(self.path.path_elements)):
+            e = self.path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                next_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                next_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        return prev_pos, next_pos
+
+    def _project_point_between_neighbors(self, idx: int, x_m: float, y_m: float) -> Tuple[float, float]:
+        prev_pos, next_pos = self._neighbor_positions_model(idx)
+        if prev_pos is None or next_pos is None:
+            return x_m, y_m
+        ax, ay = prev_pos
+        bx, by = next_pos
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 0.0:
+            return x_m, y_m
+        t = ((x_m - ax) * dx + (y_m - ay) * dy) / denom
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        proj_x = Sidebar._clamp_from_metadata('x_meters', proj_x)
+        proj_y = Sidebar._clamp_from_metadata('y_meters', proj_y)
+        return proj_x, proj_y
+
+    def _midpoint_between_neighbors(self, idx: int) -> Optional[Tuple[float, float]]:
+        prev_pos, next_pos = self._neighbor_positions_model(idx)
+        if prev_pos is None or next_pos is None:
+            return None
+        ax, ay = prev_pos
+        bx, by = next_pos
+        return (ax + bx) / 2.0, (ay + by) / 2.0
+
+    def _reproject_all_rotation_positions(self):
+        if self.path is None:
+            return
+        for idx, e in enumerate(self.path.path_elements):
+            if isinstance(e, RotationTarget):
+                proj_x, proj_y = self._project_point_between_neighbors(idx, e.x_meters, e.y_meters)
+                e.x_meters, e.y_meters = proj_x, proj_y
 
     # Removed unused getattr_deep helper for cleanliness
 
@@ -766,12 +861,29 @@ class Sidebar(QWidget):
                     if hasattr(element.translation_target, key):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
                         setattr(element.translation_target, key, clamped)
+                        # Reproject all rotation targets since endpoints changed
+                        self._reproject_all_rotation_positions()
                     if hasattr(element.rotation_target, key):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
                         setattr(element.rotation_target, key, clamped)
                 elif hasattr(element, key):
-                    clamped = Sidebar._clamp_from_metadata(key, float(value))
-                    setattr(element, key, clamped)
+                    if isinstance(element, RotationTarget) and key in ('x_meters', 'y_meters'):
+                        # Project rotation element onto segment between neighbors; adjust both x and y
+                        desired_x = float(value) if key == 'x_meters' else float(element.x_meters)
+                        desired_y = float(value) if key == 'y_meters' else float(element.y_meters)
+                        desired_x = Sidebar._clamp_from_metadata('x_meters', desired_x)
+                        desired_y = Sidebar._clamp_from_metadata('y_meters', desired_y)
+                        proj_x, proj_y = self._project_point_between_neighbors(idx, desired_x, desired_y)
+                        element.x_meters = proj_x
+                        element.y_meters = proj_y
+                        # Keep the UI in sync immediately
+                        self.update_current_values_only()
+                    else:
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element, key, clamped)
+                        # If a translation target moved, reproject rotations
+                        if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
+                            self._reproject_all_rotation_positions()
             self.modelChanged.emit()
 
     def rebuild_points_list(self):
@@ -794,15 +906,40 @@ class Sidebar(QWidget):
 
     def set_path(self, path: Path):
         self.path = path
+        # Pre-check: ensure rotation elements are projected between neighbors
+        self._reproject_all_rotation_positions()
         self.rebuild_points_list()
         # No signal here; caller coordinates initial sync
         
     def on_points_list_reordered(self):
         if self.path is None:
             return
-        new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]  # Changed to item(i), count()
-        self.path.reorder_elements(new_order)
-
+        # New order by original indices from UI items
+        new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]
+        corrected = list(new_order)
+        # Prevent rotation at start
+        if corrected:
+            first_idx = corrected[0]
+            if isinstance(self.path.path_elements[first_idx], RotationTarget):
+                # Find first non-rotation to place at start
+                for j in range(1, len(corrected)):
+                    if not isinstance(self.path.path_elements[corrected[j]], RotationTarget):
+                        corrected[0], corrected[j] = corrected[j], corrected[0]
+                        break
+        # Prevent rotation at end
+        if corrected:
+            last_idx = corrected[-1]
+            if isinstance(self.path.path_elements[last_idx], RotationTarget):
+                for j in range(len(corrected) - 2, -1, -1):
+                    if not isinstance(self.path.path_elements[corrected[j]], RotationTarget):
+                        corrected[-1], corrected[j] = corrected[j], corrected[-1]
+                        break
+        # Apply corrected order to model
+        self.path.reorder_elements(corrected)
+        # Ensure rotations are projected post-reorder
+        self._reproject_all_rotation_positions()
+        # Rebuild UI to reflect corrected model order
+        self.rebuild_points_list()
         self.modelStructureChanged.emit()
 
     # External API for other widgets
