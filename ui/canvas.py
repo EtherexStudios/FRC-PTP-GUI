@@ -37,10 +37,12 @@ class DraggablePointItem(QGraphicsEllipseItem):
             new_pos: QPointF = value
             # Clamp in scene coordinates to keep within field
             cx, cy = self.canvas_view._clamp_scene_coords(new_pos.x(), new_pos.y())
-            # Notify canvas for live updates in model coordinates
-            x_m, y_m = self.canvas_view._model_from_scene(cx, cy)
-            self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+            # Return clamped value; actual updates occur after the position is committed
             return QPointF(cx, cy)
+        elif change == QGraphicsItem.ItemPositionHasChanged:
+            # Now that the item's position is committed, notify for visual updates and model sync
+            x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+            self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
