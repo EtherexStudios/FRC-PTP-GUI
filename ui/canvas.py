@@ -16,7 +16,8 @@ FIELD_WIDTH_METERS = 8.21
 ELEMENT_RECT_WIDTH_M = 0.60
 ELEMENT_RECT_HEIGHT_M = 0.40
 TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
-BORDER_THICKNESS_M = 0.10  # visible outline thickness for outlined rectangles
+OUTLINE_THIN_M = 0.06     # thin outline (e.g., rotation dashed)
+OUTLINE_THICK_M = 0.12    # thicker outline (e.g., translation aesthetic)
 CONNECT_LINE_THICKNESS_M = 0.05
 HANDLE_LINK_THICKNESS_M = 0.03
 HANDLE_RADIUS_M = 0.12
@@ -43,8 +44,10 @@ class RectElementItem(QGraphicsRectItem):
         self.setRect(QRectF(-ELEMENT_RECT_WIDTH_M / 2.0, -ELEMENT_RECT_HEIGHT_M / 2.0, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M))
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
         # Pen/brush
+        # Use thicker border for solid-outlined elements and thinner for dashed
+        thickness = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
         pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
-                   BORDER_THICKNESS_M if outline_color is not None else 0.0)
+                   thickness if outline_color is not None else 0.0)
         if dashed_outline:
             pen.setStyle(Qt.DashLine)
         self.setPen(pen)
