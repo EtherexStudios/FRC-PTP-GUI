@@ -3,8 +3,8 @@ import math
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QTransform
-from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QTransform
+from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView
 
 from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
 
@@ -12,32 +12,90 @@ from models.path_model import Path, PathElement, TranslationTarget, RotationTarg
 FIELD_LENGTH_METERS = 16.54
 FIELD_WIDTH_METERS = 8.21
 
+# Element visual constants (in meters)
+ELEMENT_RECT_WIDTH_M = 0.60
+ELEMENT_RECT_HEIGHT_M = 0.40
+TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
+BORDER_THICKNESS_M = 0.10  # visible outline thickness for outlined rectangles
+CONNECT_LINE_THICKNESS_M = 0.05
+HANDLE_LINK_THICKNESS_M = 0.03
+HANDLE_RADIUS_M = 0.12
+HANDLE_DISTANCE_M = 0.70
+OUTLINE_EDGE_PEN = QPen(QColor("#222222"), 0.02)
 
-class DraggablePointItem(QGraphicsEllipseItem):
-    def __init__(self, canvas_view: 'CanvasView', center_m: QPointF, radius_m: float, color: QColor, index_in_model: int):
+
+class RectElementItem(QGraphicsRectItem):
+    def __init__(
+        self,
+        canvas_view: 'CanvasView',
+        center_m: QPointF,
+        index_in_model: int,
+        *,
+        filled_color: Optional[QColor],
+        outline_color: Optional[QColor],
+        dashed_outline: bool,
+        triangle_color: QColor,
+    ):
         super().__init__()
         self.canvas_view = canvas_view
         self.index_in_model = index_in_model
-        self.radius_m = radius_m
-        # Keep ellipse centered around local origin, move using setPos
-        self.setRect(QRectF(-radius_m, -radius_m, radius_m * 2, radius_m * 2))
+        # Local rect centered at origin so rotation occurs around center
+        self.setRect(QRectF(-ELEMENT_RECT_WIDTH_M / 2.0, -ELEMENT_RECT_HEIGHT_M / 2.0, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M))
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
-        self.setBrush(QBrush(color))
-        self.setPen(QPen(QColor("#222222"), 0.02))
+        # Pen/brush
+        pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
+                   BORDER_THICKNESS_M if outline_color is not None else 0.0)
+        if dashed_outline:
+            pen.setStyle(Qt.DashLine)
+        self.setPen(pen)
+        if filled_color is not None:
+            self.setBrush(QBrush(filled_color))
+        else:
+            self.setBrush(Qt.NoBrush)
+        # Interactivity flags
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setZValue(10)
+        # Inscribed triangle as child so it rotates/moves with parent
+        self.triangle_item = QGraphicsPolygonItem(self)
+        self._build_triangle(triangle_color)
+        # Current rotation in model radians (y-up)
+        self._angle_radians: float = 0.0
+
+    def _build_triangle(self, color: QColor):
+        # Triangle pointing to +X in local coordinates (to the right)
+        # Size relative to rect
+        base_size = min(ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M) * TRIANGLE_REL_SIZE
+        half_base = base_size * 0.5
+        height = base_size
+        # Define a simple isosceles triangle centered at origin pointing right:
+        # points: tip at (height/2, 0), back upper (-height/2, half_base), back lower (-height/2, -half_base)
+        points = [
+            QPointF(height / 2.0, 0.0),
+            QPointF(-height / 2.0, half_base),
+            QPointF(-height / 2.0, -half_base),
+        ]
+        polygon = QPolygonF(points)
+        self.triangle_item.setPolygon(polygon)
+        self.triangle_item.setBrush(QBrush(color))
+        self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+        self.triangle_item.setZValue(self.zValue() + 1)
 
     def set_center(self, center_m: QPointF):
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+
+    def set_angle_radians(self, radians: float):
+        self._angle_radians = radians
+        # Convert model (y-up) to scene (y-down) and set degrees
+        angle_scene = -radians
+        self.setRotation(math.degrees(angle_scene))
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
             new_pos: QPointF = value
             # Constrain movement based on element type and neighbors
             cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
-            # Return clamped value; actual updates occur after the position is committed
             return QPointF(cx, cy)
         elif change == QGraphicsItem.ItemPositionHasChanged:
             # Now that the item's position is committed, notify for visual updates and model sync
@@ -59,7 +117,7 @@ class DraggablePointItem(QGraphicsEllipseItem):
 
 
 class RotationHandle(QGraphicsEllipseItem):
-    def __init__(self, canvas_view: 'CanvasView', parent_center_item: DraggablePointItem, handle_distance_m: float, handle_radius_m: float, color: QColor):
+    def __init__(self, canvas_view: 'CanvasView', parent_center_item: RectElementItem, handle_distance_m: float, handle_radius_m: float, color: QColor):
         super().__init__()
         self.canvas_view = canvas_view
         self.center_item = parent_center_item
@@ -74,7 +132,7 @@ class RotationHandle(QGraphicsEllipseItem):
         self.setZValue(12)
         self._angle_radians: float = 0.0
         self.link_line = QGraphicsLineItem()
-        self.link_line.setPen(QPen(QColor("#888888"), 0.03))
+        self.link_line.setPen(QPen(QColor("#888888"), HANDLE_LINK_THICKNESS_M))
         self.link_line.setZValue(11)
         # Local geometry centered on origin
         self.setRect(QRectF(-handle_radius_m, -handle_radius_m, handle_radius_m * 2, handle_radius_m * 2))
@@ -167,7 +225,7 @@ class CanvasView(QGraphicsView):
 
         self._field_pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._path: Optional[Path] = None
-        self._items: List[Tuple[str, DraggablePointItem, Optional[RotationHandle]]] = []
+        self._items: List[Tuple[str, RectElementItem, Optional[RotationHandle]]] = []
         self._connect_lines: List[QGraphicsLineItem] = []
 
         self._load_field_background("assets/field25.png")
@@ -201,8 +259,10 @@ class CanvasView(QGraphicsView):
                 element = self._path.path_elements[i]
                 pos = self._element_position(element)
                 item.set_center(QPointF(pos[0], pos[1]))
+                # Set rotation for waypoint/rotation; translation remains unrotated
+                angle = self._element_rotation(element)
+                item.set_angle_radians(angle if kind in ("rotation", "waypoint") else 0.0)
                 if handle is not None:
-                    angle = self._element_rotation(element)
                     handle.set_angle(angle)
         finally:
             self._suppress_live_events = False
@@ -220,6 +280,7 @@ class CanvasView(QGraphicsView):
             item.set_center(QPointF(pos[0], pos[1]))
             if handle is not None:
                 angle = self._element_rotation(element)
+                item.set_angle_radians(angle)
                 handle.set_angle(angle)
         self._update_connecting_lines()
 
@@ -273,24 +334,45 @@ class CanvasView(QGraphicsView):
 
             # Choose visuals by element type
             if isinstance(element, TranslationTarget):
-                color = QColor("#3aa3ff")
-                radius = 0.20
                 kind = "translation"
-                item = DraggablePointItem(self, QPointF(pos[0], pos[1]), radius, color, i)
+                item = RectElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=None,
+                    outline_color=QColor("#3aa3ff"),
+                    dashed_outline=False,
+                    triangle_color=QColor("#3aa3ff"),
+                )
                 rotation_handle = None
+                item.set_angle_radians(0.0)
             elif isinstance(element, RotationTarget):
-                color = QColor("#ff7f3a")
-                radius = 0.22
                 kind = "rotation"
-                item = DraggablePointItem(self, QPointF(pos[0], pos[1]), radius, color, i)
-                rotation_handle = RotationHandle(self, item, handle_distance_m=0.7, handle_radius_m=0.12, color=QColor("#ffaa00"))
+                item = RectElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=None,
+                    outline_color=QColor("#50c878"),
+                    dashed_outline=True,
+                    triangle_color=QColor("#50c878"),
+                )
+                rotation_handle = RotationHandle(self, item, handle_distance_m=HANDLE_DISTANCE_M, handle_radius_m=HANDLE_RADIUS_M, color=QColor("#50c878"))
+                item.set_angle_radians(self._element_rotation(element))
             elif isinstance(element, Waypoint):
-                color = QColor("#50c878")
-                radius = 0.24
                 kind = "waypoint"
-                item = DraggablePointItem(self, QPointF(pos[0], pos[1]), radius, color, i)
-                rotation_handle = RotationHandle(self, item, handle_distance_m=0.7, handle_radius_m=0.12, color=QColor("#c4ff00"))
+                item = RectElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=QColor("#ff7f3a"),
+                    outline_color=QColor("#ff7f3a"),
+                    dashed_outline=False,
+                    triangle_color=QColor("#000000"),
+                )
+                rotation_handle = RotationHandle(self, item, handle_distance_m=HANDLE_DISTANCE_M, handle_radius_m=HANDLE_RADIUS_M, color=QColor("#ff7f3a"))
                 # Initialize rotation from waypoint's rotation target
+                item.set_angle_radians(self._element_rotation(element))
                 rotation_handle.set_angle(self._element_rotation(element))
             else:
                 # Unknown, skip
@@ -329,7 +411,7 @@ class CanvasView(QGraphicsView):
             _, a, _ = self._items[i]
             _, b, _ = self._items[i + 1]
             line = QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
-            line.setPen(QPen(QColor("#cccccc"), 0.05))
+            line.setPen(QPen(QColor("#cccccc"), CONNECT_LINE_THICKNESS_M))
             line.setZValue(5)
             self.graphics_scene.addItem(line)
             self._connect_lines.append(line)
@@ -354,6 +436,12 @@ class CanvasView(QGraphicsView):
             self._reproject_rotation_items_in_scene()
 
     def _on_item_live_rotated(self, index: int, angle_radians: float):
+        # Update visual rotation immediately
+        kind, item, handle = self._items[index]
+        if kind in ("rotation", "waypoint"):
+            item.set_angle_radians(angle_radians)
+            if handle is not None:
+                handle.set_angle(angle_radians)
         self.elementRotated.emit(index, angle_radians)
 
     def _on_item_clicked(self, index: int):
