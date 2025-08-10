@@ -24,7 +24,7 @@ class MainWindow(QMainWindow):
             RotationTarget(rotation_radians=math.radians(45), x_meters=center_x, y_meters=center_y + 1.5),
             # Center - Waypoint (rotation -30 deg)
             Waypoint(
-                translation_target=TranslationTarget(x_meters=center_x, y_meters=center_y),
+                translation_target=TranslationTarget(x_meters=center_x+1, y_meters=center_y),
                 rotation_target=RotationTarget(rotation_radians=math.radians(-30), x_meters=center_x, y_meters=center_y)
             ),
             # Right of center - TranslationTarget
@@ -61,6 +61,8 @@ class MainWindow(QMainWindow):
         # Canvas interactions -> update model and sidebar
         self.canvas.elementMoved.connect(self._on_canvas_element_moved, Qt.QueuedConnection)
         self.canvas.elementRotated.connect(self._on_canvas_element_rotated, Qt.QueuedConnection)
+        # Handle end-of-drag to fix rotation ordering once user releases
+        self.canvas.elementDragFinished.connect(self._on_canvas_drag_finished, Qt.QueuedConnection)
 
     def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
         if index < 0 or index >= len(self.path.path_elements):
@@ -82,7 +84,6 @@ class MainWindow(QMainWindow):
             elem.rotation_target.x_meters = x_m
             elem.rotation_target.y_meters = y_m
 
-        # Update only values to avoid rebuilding the UI while dragging
         self.sidebar.update_current_values_only()
 
     def _on_canvas_element_rotated(self, index: int, radians: float):
@@ -145,3 +146,21 @@ class MainWindow(QMainWindow):
         proj_x = Sidebar._clamp_from_metadata('x_meters', proj_x)
         proj_y = Sidebar._clamp_from_metadata('y_meters', proj_y)
         return proj_x, proj_y
+
+    def _on_canvas_drag_finished(self, index: int):
+        """Called once per item when the user releases the mouse after dragging."""
+        if index < 0 or index >= len(self.path.path_elements):
+            return
+        # Remember which element was dragged so we can re-select it after any reordering
+        dragged_elem = self.path.path_elements[index]
+
+        # Re-evaluate rotation order now that the drag is complete
+        self.sidebar._check_and_swap_rotation_targets()
+
+        # Attempt to restore selection for the dragged element
+        try:
+            new_index = self.path.path_elements.index(dragged_elem)
+        except ValueError:
+            new_index = -1
+        if new_index >= 0:
+            self.sidebar.select_index(new_index)

@@ -27,13 +27,9 @@ class CustomList(QListWidget):  # Changed to QListWidget
 
     def dropEvent(self, event):
         super().dropEvent(event)
-
+        # Do not mutate item data or text here; items already reordered visually.
+        # Emitting reordered lets the owner update the underlying model.
         self.reordered.emit()
-
-        for i in range(self.count()):  # Changed to count() for QListWidget
-            item = self.item(i)  # Changed to item(i)
-            item.setData(Qt.UserRole, i)  # No column
-            item.setText(f"{item.text().split()[0]}")
 
 class PopupCombobox(QWidget):
     item_selected = Signal(str)
@@ -138,9 +134,23 @@ class Sidebar(QWidget):
         main_layout = QVBoxLayout(self)
         self.setMinimumWidth(300) # Set a minimum width for the sidebar
 
-        # Top section for the list label
+        # Top section for the list label and add button in horizontal layout
+        top_section = QWidget()
+        top_layout = QHBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+        
         label = QLabel("Path Elements")
-        main_layout.addWidget(label)
+        top_layout.addWidget(label)
+        
+        top_layout.addStretch()  # Add stretch to push button to the right
+        
+        self.add_element_pop = PopupCombobox()
+        self.add_element_pop.setText("Add element")
+        self.add_element_pop.setToolTip("Add a path element at the current selection")
+        top_layout.addWidget(self.add_element_pop)
+        
+        main_layout.addWidget(top_section)
 
         self.path = path
         
@@ -347,6 +357,9 @@ class Sidebar(QWidget):
 
         self.optional_pop.item_selected.connect(self.on_attribute_added)
         
+        # Add element dropdown wiring
+        self.add_element_pop.item_selected.connect(self.on_add_element_selected)
+        
         self.rebuild_points_list()
     
     def hide_spinners(self):
@@ -360,11 +373,15 @@ class Sidebar(QWidget):
         self.title_bar.setVisible(False)
 
     def get_selected_index(self):
-        selected = self.points_list.selectedItems()
-        if selected:
-            return selected[0].data(Qt.UserRole)
-        else:
+        # Prefer current row which mirrors list order to model
+        row = self.points_list.currentRow()
+        if row is None or row < 0:
             return None
+        if self.path is None:
+            return None
+        if row >= len(self.path.path_elements):
+            return None
+        return row
     
     def expose_element(self, element):
         if element is None:
@@ -592,10 +609,20 @@ class Sidebar(QWidget):
             if idx is None or self.path is None:
                 self.hide_spinners()
                 return
-            element = self.path.get_element(idx)
+            # Validate index before accessing the model
+            if idx < 0 or idx >= len(self.path.path_elements):
+                self.hide_spinners()
+                return
+            try:
+                element = self.path.get_element(idx)
+            except IndexError:
+                # Model changed asynchronously; bail out gracefully
+                self.hide_spinners()
+                return
             self.optional_pop.clear()
             self.hide_spinners()
 
+            # Expose without causing modelChanged while rebuilding UI
             self.expose_element(element)
             # expose combo box
             if isinstance(element, TranslationTarget):
@@ -605,12 +632,14 @@ class Sidebar(QWidget):
             else:
                 current_type = ElementType.WAYPOINT
             self._rebuild_type_combo_for_index(idx, current_type)
+            # Refresh add-element options based on new selection context
+            self._refresh_add_dropdown_items()
             
             self.type_label.setVisible(True)
             self.type_combo.setVisible(True)
             self.form_container.setVisible(True)
             self.title_bar.setVisible(True)
-            # Emit selection for outside listeners (e.g., canvas) after UI is ready
+            # Emit selection for outside listeners (e.g., canvas) after UI is ready and index is valid
             QTimer.singleShot(0, lambda i=idx: self.elementSelected.emit(i))
         except Exception as e:
             # Fail safe: keep UI alive
@@ -747,18 +776,25 @@ class Sidebar(QWidget):
                     new_elem.translation_target.x_meters = new_elem.rotation_target.x_meters
                     new_elem.translation_target.y_meters = new_elem.rotation_target.y_meters
 
-            # If we have just created or switched to a rotation element, snap its x/y to midpoint
+            # If we have just created or switched to a rotation element, snap its x/y to closest point on line between neighbors
             if new_type == ElementType.ROTATION:
-                mid = self._midpoint_between_neighbors(idx)
-                if mid is not None:
-                    mx, my = mid
-                    new_elem.x_meters = mx
-                    new_elem.y_meters = my
+                # Update the model first so _project_point_between_neighbors can find the correct neighbors
+                self.path.path_elements[idx] = new_elem
+                # Project the current position onto the line between neighbors
+                proj_x, proj_y = self._project_point_between_neighbors(idx, new_elem.x_meters, new_elem.y_meters)
+                new_elem.x_meters = proj_x
+                new_elem.y_meters = proj_y
+                # Update the model again with the corrected coordinates
+                self.path.path_elements[idx] = new_elem
+                
+                # Check if we need to swap rotation targets to maintain visual order
+                self._check_and_swap_rotation_targets()
+            else:
+                # For non-rotation elements, just update the model
+                self.path.path_elements[idx] = new_elem
 
-            self.path.path_elements[idx] = new_elem
-            item = self.points_list.currentItem()
-            item.setText(f"{new_type.value}")
-            self.on_item_selected()  # Refresh fields
+            self.rebuild_points_list()
+            self.select_index(idx)
             self.modelStructureChanged.emit()
 
     def _rebuild_type_combo_for_index(self, idx: int, current_type: ElementType):
@@ -888,21 +924,57 @@ class Sidebar(QWidget):
 
     def rebuild_points_list(self):
         self.hide_spinners()
-        self.points_list.clear()
-        if self.path:
-            for i, p in enumerate(self.path.path_elements):
-                if isinstance(p, TranslationTarget):
-                    name = ElementType.TRANSLATION.value
-                elif isinstance(p, RotationTarget):
-                    name = ElementType.ROTATION.value
-                elif isinstance(p, Waypoint):
-                    name = ElementType.WAYPOINT.value
-                else:
-                    name = "Unknown"
-                    
-                item = QListWidgetItem(name)  # Changed to QListWidgetItem, no []
-                item.setData(Qt.UserRole, i)  # No column 0
-                self.points_list.addItem(item)  # Changed to addItem
+        # Remove and delete any existing row widgets to prevent visual artifacts
+        try:
+            self.points_list.blockSignals(True)
+            for i in range(self.points_list.count()):
+                item = self.points_list.item(i)
+                w = self.points_list.itemWidget(item)
+                if w is not None:
+                    self.points_list.removeItemWidget(item)
+                    w.deleteLater()
+            self.points_list.clear()
+            # Rebuild add-element dropdown items based on selection context
+            self._refresh_add_dropdown_items()
+            if self.path:
+                for i, p in enumerate(self.path.path_elements):
+                    if isinstance(p, TranslationTarget):
+                        name = ElementType.TRANSLATION.value
+                    elif isinstance(p, RotationTarget):
+                        name = ElementType.ROTATION.value
+                    elif isinstance(p, Waypoint):
+                        name = ElementType.WAYPOINT.value
+                    else:
+                        name = "Unknown"
+
+                    # Use an empty QListWidgetItem and render all visuals via a row widget to avoid duplicate text painting
+                    item = QListWidgetItem("")
+                    item.setData(Qt.UserRole, i)
+                    # Build row widget with label and remove button
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setContentsMargins(6, 0, 6, 0)
+                    row_layout.setSpacing(6)
+                    label = QLabel(name)
+                    label.setStyleSheet("color: #f0f0f0;")
+                    row_layout.addWidget(label)
+                    row_layout.addStretch()
+                    remove_btn = QPushButton()
+                    remove_btn.setIcon(QIcon("assets/remove_icon.png"))
+                    remove_btn.setToolTip("Remove element")
+                    remove_btn.setFixedSize(18, 18)
+                    remove_btn.setIconSize(QSize(14, 14))
+                    remove_btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")
+                    # Capture current index by default-arg
+                    remove_btn.clicked.connect(lambda checked=False, idx_to_remove=i: self._on_remove_element(idx_to_remove))
+                    row_layout.addWidget(remove_btn)
+
+                    # Ensure the row height matches the widget
+                    item.setSizeHint(row_widget.sizeHint())
+                    self.points_list.addItem(item)
+                    self.points_list.setItemWidget(item, row_widget)
+        finally:
+            self.points_list.blockSignals(False)
 
     def set_path(self, path: Path):
         self.path = path
@@ -915,27 +987,16 @@ class Sidebar(QWidget):
         if self.path is None:
             return
         # New order by original indices from UI items
-        new_order = [self.points_list.item(i).data(Qt.UserRole) for i in range(self.points_list.count())]
-        corrected = list(new_order)
-        # Prevent rotation at start
-        if corrected:
-            first_idx = corrected[0]
-            if isinstance(self.path.path_elements[first_idx], RotationTarget):
-                # Find first non-rotation to place at start
-                for j in range(1, len(corrected)):
-                    if not isinstance(self.path.path_elements[corrected[j]], RotationTarget):
-                        corrected[0], corrected[j] = corrected[j], corrected[0]
-                        break
-        # Prevent rotation at end
-        if corrected:
-            last_idx = corrected[-1]
-            if isinstance(self.path.path_elements[last_idx], RotationTarget):
-                for j in range(len(corrected) - 2, -1, -1):
-                    if not isinstance(self.path.path_elements[corrected[j]], RotationTarget):
-                        corrected[-1], corrected[j] = corrected[j], corrected[-1]
-                        break
-        # Apply corrected order to model
-        self.path.reorder_elements(corrected)
+        new_order = []
+        for i in range(self.points_list.count()):
+            item = self.points_list.item(i)
+            idx = item.data(Qt.UserRole)
+            if isinstance(idx, int):
+                new_order.append(idx)
+        # Apply order to model
+        self.path.reorder_elements(new_order)
+        # Repair any invalid placements
+        self._repair_rotation_at_ends()
         # Ensure rotations are projected post-reorder
         self._reproject_all_rotation_positions()
         # Rebuild UI to reflect corrected model order
@@ -948,9 +1009,224 @@ class Sidebar(QWidget):
             return
         if index < 0 or index >= self.points_list.count():
             return
+        # Let the QListWidget emit itemSelectionChanged; avoid double-calling on_item_selected
         self.points_list.setCurrentRow(index)
-        self.on_item_selected()
 
     def refresh_current_selection(self):
         # Re-run expose for current selection using current model values
         self.on_item_selected()
+
+    # -------------------- Add/Remove elements --------------------
+    def _refresh_add_dropdown_items(self):
+        # Allow adding rotation only if there are at least two translation or waypoint elements
+        if self.path is None:
+            self.add_element_pop.clear()
+            return
+        non_rot = sum(1 for e in self.path.path_elements if not isinstance(e, RotationTarget))
+        items = [ElementType.TRANSLATION.value, ElementType.WAYPOINT.value]
+        if non_rot >= 2:
+            items.append(ElementType.ROTATION.value)
+        self.add_element_pop.add_items(items)
+
+    def _insert_position_from_selection(self) -> int:
+        # Insert AFTER the selected row; if nothing selected, append at end
+        current_row = self.points_list.currentRow()
+        if current_row < 0:
+            return len(self.path.path_elements) if self.path else 0
+        return current_row + 1
+
+    def on_add_element_selected(self, type_text: str):
+        if self.path is None:
+            return
+        new_type = ElementType(type_text)
+        insert_pos = self._insert_position_from_selection()
+        # Enforce rotation cannot be at start/end
+        if new_type == ElementType.ROTATION:
+            if insert_pos == 0:
+                insert_pos = 1
+            if insert_pos == len(self.path.path_elements):
+                insert_pos = max(0, len(self.path.path_elements) - 1)
+            if len(self.path.path_elements) == 0:
+                # Cannot add rotation as the first element; switch to translation
+                new_type = ElementType.TRANSLATION
+        # Build the new element with sensible defaults
+        def current_pos_defaults() -> Tuple[float, float]:
+            idx = self.get_selected_index()
+            if idx is None or idx < 0 or idx >= len(self.path.path_elements):
+                # Default to center field
+                return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+            e = self.path.path_elements[idx]
+            if isinstance(e, TranslationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            if isinstance(e, Waypoint):
+                return float(e.translation_target.x_meters), float(e.translation_target.y_meters)
+            if isinstance(e, RotationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+        x0, y0 = current_pos_defaults()
+        if new_type == ElementType.TRANSLATION:
+            new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
+        elif new_type == ElementType.WAYPOINT:
+            tt = TranslationTarget(x_meters=x0, y_meters=y0)
+            rt = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+            new_elem = Waypoint(translation_target=tt, rotation_target=rt)
+        else:  # ROTATION
+            new_elem = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+        # Insert and then fix constraints/positions
+        self.path.path_elements.insert(insert_pos, new_elem)
+        # If we inserted a rotation, snap it to midpoint between neighbors
+        if isinstance(new_elem, RotationTarget):
+            mid = self._midpoint_between_neighbors(insert_pos)
+            if mid is not None:
+                mx, my = mid
+                new_elem.x_meters = mx
+                new_elem.y_meters = my
+        # After any insert, ensure rotations are not at ends; if they are, swap inward with nearest non-rotation
+        self._repair_rotation_at_ends()
+        # Reproject rotation positions
+        self._reproject_all_rotation_positions()
+        # Rebuild UI and select newly inserted element (find its new index by identity)
+        identity = id(new_elem)
+        self.rebuild_points_list()
+        new_index = next((i for i, e in enumerate(self.path.path_elements) if id(e) == identity), insert_pos)
+        self.select_index(new_index)
+        self.modelStructureChanged.emit()
+
+    def _on_remove_element(self, idx_to_remove: int):
+        if self.path is None:
+            return
+        if idx_to_remove < 0 or idx_to_remove >= len(self.path.path_elements):
+            return
+        removed = self.path.path_elements.pop(idx_to_remove)
+        # After removal, ensure we do not end with rotation at start or end
+        self._repair_rotation_at_ends()
+        # Reproject post-change
+        self._reproject_all_rotation_positions()
+        # Rebuild list and update selection sensibly
+        self.rebuild_points_list()
+        # Select previous index or last available
+        if self.path.path_elements:
+            new_sel = min(idx_to_remove, len(self.path.path_elements) - 1)
+            self.select_index(new_sel)
+        self.modelStructureChanged.emit()
+
+    def _repair_rotation_at_ends(self):
+        if self.path is None or not self.path.path_elements:
+            return
+        elems = self.path.path_elements
+        # Repair start
+        if isinstance(elems[0], RotationTarget):
+            non_rots = sum(1 for e in elems if not isinstance(e, RotationTarget))
+            if non_rots > 1:
+                # Swap with the first non_rot
+                swap_idx = next((i for i, e in enumerate(elems) if not isinstance(e, RotationTarget)), None)
+                if swap_idx is not None:
+                    elems[0], elems[swap_idx] = elems[swap_idx], elems[0]
+            else:
+                # Convert start to TranslationTarget
+                old = elems[0]
+                elems[0] = TranslationTarget(
+                    x_meters=old.x_meters,
+                    y_meters=old.y_meters
+                )
+        # Repair end
+        if elems and isinstance(elems[-1], RotationTarget):
+            non_rots = sum(1 for e in elems if not isinstance(e, RotationTarget))
+            if non_rots > 1:
+                # Swap with the last non_rot
+                swap_idx = next((len(elems) - 1 - i for i, e in enumerate(reversed(elems)) if not isinstance(e, RotationTarget)), None)
+                if swap_idx is not None:
+                    elems[-1], elems[swap_idx] = elems[swap_idx], elems[-1]
+            else:
+                # Convert end to TranslationTarget
+                old = elems[-1]
+                elems[-1] = TranslationTarget(
+                    x_meters=old.x_meters,
+                    y_meters=old.y_meters
+                )
+
+    def _check_and_swap_rotation_targets(self):
+        """Ensure rotation targets between two anchor elements (translation/waypoint) are ordered
+        in the model according to their geometric order along the line segment connecting
+        those anchors.  Ordering is determined by the parametric value *t* (0-1) obtained by
+        projecting each rotation target onto the anchor-to-anchor line.
+        """
+        if self.path is None or len(self.path.path_elements) < 3:
+            return
+
+        elems = self.path.path_elements
+
+        # Helper to get an element's position (model coordinates)
+        def _pos(el):
+            if isinstance(el, TranslationTarget):
+                return float(el.x_meters), float(el.y_meters)
+            if isinstance(el, Waypoint):
+                tt = el.translation_target
+                return float(tt.x_meters), float(tt.y_meters)
+            if isinstance(el, RotationTarget):
+                return float(el.x_meters), float(el.y_meters)
+            return None
+
+        # Collect indices of anchor elements (translation targets and waypoints)
+        anchor_indices = [i for i, e in enumerate(elems) if isinstance(e, (TranslationTarget, Waypoint))]
+        if len(anchor_indices) < 2:
+            return  # not enough anchors to form segments
+
+        changed = False
+
+        # Iterate over each consecutive anchor pair
+        for seg_idx in range(len(anchor_indices) - 1):
+            start_idx = anchor_indices[seg_idx]
+            end_idx = anchor_indices[seg_idx + 1]
+
+            # Gather rotation elements between anchors
+            between_indices = [j for j in range(start_idx + 1, end_idx) if isinstance(elems[j], RotationTarget)]
+            if len(between_indices) < 2:
+                continue  # nothing to reorder for this segment
+
+            # Anchor positions and vector
+            ax, ay = _pos(elems[start_idx])
+            bx, by = _pos(elems[end_idx])
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom == 0:
+                continue  # degenerate segment – skip
+
+            # Compute parametric t for each rotation (projection onto AB, clamped to [0,1])
+            rot_t_pairs = []  # (index, t)
+            for j in between_indices:
+                rx, ry = _pos(elems[j])
+                t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+                rot_t_pairs.append((j, t))
+
+            # Desired order based on increasing t
+            rot_t_pairs.sort(key=lambda p: p[1])
+            desired_order = [idx for idx, _ in rot_t_pairs]
+
+            # Current order (model list order) is just between_indices
+            if between_indices == desired_order:
+                continue  # already correct
+
+            changed = True
+
+            # Extract the rotation elements in desired order BEFORE modifying the list
+            desired_elements = [elems[idx] for idx in desired_order]
+
+            # Remove all rotation elements between anchors (iterate in reverse to keep indices valid)
+            for j in reversed(between_indices):
+                elems.pop(j)
+
+            # Re-insert in correct order starting right after start_idx
+            insert_at = start_idx + 1
+            for el in desired_elements:
+                elems.insert(insert_at, el)
+                insert_at += 1
+
+            # After first successful reorder we stop – another call will evaluate remaining segments
+            break
+
+        if changed:
+            # Rebuild UI and notify listeners
+            self.rebuild_points_list()
+            self.modelStructureChanged.emit()
