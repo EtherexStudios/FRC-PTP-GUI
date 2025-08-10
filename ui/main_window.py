@@ -6,7 +6,7 @@ from .sidebar import Sidebar
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
 from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from typing import Tuple
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent
 from utils.project_manager import ProjectManager
 from .config_dialog import ConfigDialog
 
@@ -38,8 +38,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_path(self.path)
 
         # Wire up interactions: sidebar <-> canvas
-        self.sidebar.elementSelected.connect(self.canvas.select_index)
-        self.canvas.elementSelected.connect(self.sidebar.select_index)
+        self.sidebar.elementSelected.connect(self.canvas.select_index, Qt.QueuedConnection)
+        self.canvas.elementSelected.connect(self.sidebar.select_index, Qt.QueuedConnection)
 
         # Sidebar changes -> canvas refresh
         self.sidebar.modelChanged.connect(self.canvas.refresh_from_model)
@@ -71,6 +71,35 @@ class MainWindow(QMainWindow):
 
         # Startup: load last project or prompt
         QTimer.singleShot(0, self._startup_load)
+
+        # Stabilization flag for fullscreen/window state transitions
+        self._layout_stabilizing: bool = False
+        # Mark sidebar ready after initial layout
+        QTimer.singleShot(0, self.sidebar.mark_ready)
+
+    def changeEvent(self, event):
+        # Detect window state changes (e.g., entering/exiting fullscreen) and
+        # enable a brief stabilization window to avoid re-entrant UI churn.
+        if event.type() == QEvent.WindowStateChange:
+            self._layout_stabilizing = True
+            try:
+                self.sidebar.set_suspended(True)
+            except Exception:
+                pass
+            # Clear after a short delay once layout settles
+            def _clear():
+                setattr(self, '_layout_stabilizing', False)
+                try:
+                    self.sidebar.set_suspended(False)
+                except Exception:
+                    pass
+            QTimer.singleShot(300, _clear)
+        super().changeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Mark sidebar ready after the window is shown
+        QTimer.singleShot(0, self.sidebar.mark_ready)
 
     # ---------------- Menu Bar ----------------
     def _build_menu_bar(self):
@@ -597,6 +626,9 @@ class MainWindow(QMainWindow):
                     self.statusBar.showMessage("No path loaded")
 
     def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
+        # Suppress during window state transitions to avoid re-entrant churn
+        if getattr(self, '_layout_stabilizing', False):
+            return
         if index < 0 or index >= len(self.path.path_elements):
             return
         # Clamp via sidebar metadata to keep UI and model consistent
@@ -620,6 +652,9 @@ class MainWindow(QMainWindow):
         # defer autosave until drag finished; handled by elementDragFinished
 
     def _on_canvas_element_rotated(self, index: int, radians: float):
+        # Suppress during window state transitions to avoid re-entrant churn
+        if getattr(self, '_layout_stabilizing', False):
+            return
         if index < 0 or index >= len(self.path.path_elements):
             return
         elem = self.path.path_elements[index]
@@ -684,6 +719,8 @@ class MainWindow(QMainWindow):
 
     def _on_canvas_drag_finished(self, index: int):
         """Called once per item when the user releases the mouse after dragging."""
+        if getattr(self, '_layout_stabilizing', False):
+            return
         if index < 0 or index >= len(self.path.path_elements):
             return
         # Remember which element was dragged so we can re-select it after any reordering

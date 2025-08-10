@@ -1,19 +1,31 @@
 [
   {
     "type": "translation",
-    "x_meters": 7.36781818181818,
-    "y_meters": 2.4058787878787884
+    "x_meters": 10.4,
+    "y_meters": 3.99
   },
   {
     "type": "waypoint",
     "translation_target": {
-      "x_meters": 4.636212121212122,
-      "y_meters": 5.864242424242424
+      "x_meters": 6.165606060606061,
+      "y_meters": 3.690696969696969
     },
     "rotation_target": {
       "rotation_radians": 0.0,
-      "x_meters": 4.636212121212122,
-      "y_meters": 5.864242424242424
+      "x_meters": 6.165606060606061,
+      "y_meters": 3.690696969696969
+    }
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 5.79,
+      "y_meters": 3.22
+    },
+    "rotation_target": {
+      "rotation_radians": 0.0,
+      "x_meters": 5.79,
+      "y_meters": 3.22
     }
   }
 ]

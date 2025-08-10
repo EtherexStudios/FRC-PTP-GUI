@@ -156,6 +156,9 @@ class Sidebar(QWidget):
         self.path = path
         # Optional: set externally to access config defaults
         self.project_manager = None
+        # Re-entrancy/visibility guards
+        self._suspended: bool = False
+        self._ready: bool = False
         
         self.points_list = CustomList()
         main_layout.addWidget(self.points_list)
@@ -352,7 +355,11 @@ class Sidebar(QWidget):
         main_layout.addWidget(self.form_container)
         main_layout.addStretch() # Pushes all content to the top
         
-        self.points_list.itemSelectionChanged.connect(self.on_item_selected)
+        # Defer selection handling to the next event loop to avoid re-entrancy
+        try:
+            self.points_list.itemSelectionChanged.connect(self.on_item_selected)
+        except Exception:
+            pass
         self.points_list.reordered.connect(self.on_points_list_reordered)
         # Additional guard: prevent dragging rotation to start or end by enforcing after drop
 
@@ -374,6 +381,12 @@ class Sidebar(QWidget):
         self.type_label.setVisible(False)
         self.form_container.setVisible(False)
         self.title_bar.setVisible(False)
+
+    def set_suspended(self, suspended: bool):
+        self._suspended = bool(suspended)
+
+    def mark_ready(self):
+        self._ready = True
 
     def get_selected_index(self):
         # Prefer current row which mirrors list order to model
@@ -623,45 +636,75 @@ class Sidebar(QWidget):
 
     def on_item_selected(self):
         try:
+            # Guard against re-entrancy and layout instability
+            if getattr(self, '_suspended', False) or not getattr(self, '_ready', False):
+                return
+            
             idx = self.get_selected_index()
             if idx is None or self.path is None:
                 self.hide_spinners()
                 return
-            # Validate index before accessing the model
+            
+            # Validate index bounds
             if idx < 0 or idx >= len(self.path.path_elements):
                 self.hide_spinners()
                 return
+            
+            # Safely get element
             try:
                 element = self.path.get_element(idx)
-            except IndexError:
-                # Model changed asynchronously; bail out gracefully
+            except (IndexError, RuntimeError):
                 self.hide_spinners()
                 return
+            
+            # Clear and hide existing UI
             self.optional_pop.clear()
             self.hide_spinners()
-
-            # Expose without causing modelChanged while rebuilding UI
-            self.expose_element(element)
-            # expose combo box
-            if isinstance(element, TranslationTarget):
-                current_type = ElementType.TRANSLATION
-            elif isinstance(element, RotationTarget):
-                current_type = ElementType.ROTATION
-            else:
-                current_type = ElementType.WAYPOINT
-            self._rebuild_type_combo_for_index(idx, current_type)
-            # Refresh add-element options based on new selection context
-            self._refresh_add_dropdown_items()
             
-            self.type_label.setVisible(True)
-            self.type_combo.setVisible(True)
-            self.form_container.setVisible(True)
-            self.title_bar.setVisible(True)
-            # Emit selection for outside listeners (e.g., canvas) after UI is ready and index is valid
-            QTimer.singleShot(0, lambda i=idx: self.elementSelected.emit(i))
+            # Expose element properties (guarded)
+            try:
+                self.expose_element(element)
+            except (RuntimeError, AttributeError):
+                return
+            
+            # Determine element type safely
+            try:
+                if isinstance(element, TranslationTarget):
+                    current_type = ElementType.TRANSLATION
+                elif isinstance(element, RotationTarget):
+                    current_type = ElementType.ROTATION
+                else:
+                    current_type = ElementType.WAYPOINT
+            except RuntimeError:
+                return
+            
+            # Rebuild type combo (guarded)
+            try:
+                self._rebuild_type_combo_for_index(idx, current_type)
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            
+            # Refresh add-element options (guarded)
+            try:
+                self._refresh_add_dropdown_items()
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            
+            # Show controls (guarded)
+            try:
+                for widget in (self.type_label, self.type_combo, self.form_container, self.title_bar):
+                    if widget is not None:
+                        widget.setVisible(True)
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            
+            # Note: elementSelected signal intentionally not emitted here to avoid
+            # re-entrant selection loops during fullscreen/resize transitions
+            
         except Exception as e:
             # Fail safe: keep UI alive
-            print("Sidebar on_item_selected error:", e)
+            print(f"Sidebar selection error: {e}")
+            self.hide_spinners()
     
     def on_attribute_removed(self, key):
         idx = self.get_selected_index()
@@ -1045,8 +1088,8 @@ class Sidebar(QWidget):
             return
         if index < 0 or index >= self.points_list.count():
             return
-        # Let the QListWidget emit itemSelectionChanged; avoid double-calling on_item_selected
-        self.points_list.setCurrentRow(index)
+        # Defer selection to avoid re-entrancy during fullscreen/layout changes
+        QTimer.singleShot(0, lambda i=index: self.points_list.setCurrentRow(i))
 
     def refresh_current_selection(self):
         # Re-run expose for current selection using current model values

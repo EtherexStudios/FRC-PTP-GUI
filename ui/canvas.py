@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView
 
@@ -444,6 +444,14 @@ class CanvasView(QGraphicsView):
             for i in range(count):
                 try:
                     kind, item, handle = self._items[i]
+                    if item is None:
+                        continue
+                    # Skip if the C++ object is gone
+                    try:
+                        if item.scene() is None:
+                            continue
+                    except RuntimeError:
+                        continue
                     element = self._path.path_elements[i]
                     pos = self._element_position(element)
                     item.set_center(QPointF(pos[0], pos[1]))
@@ -496,19 +504,62 @@ class CanvasView(QGraphicsView):
     def select_index(self, index: int):
         if index is None or index < 0 or index >= len(self._items):
             return
-        # visually select
-        _, item, _ = self._items[index]
-        self.graphics_scene.clearSelection()
-        item.setSelected(True)
-        self.centerOn(item)
+        # visually select (defensively handle deleted/invalid C++ objects)
+        try:
+            _, item, _ = self._items[index]
+        except Exception:
+            return
+        if item is None:
+            return
+        # If the underlying C++ object has been deleted, PySide can segfault.
+        # Check that the item is still attached to a scene before using it.
+        try:
+            if getattr(item, 'scene', None) is None:
+                return
+            if item.scene() is None:
+                return
+        except RuntimeError:
+            # Wrapped C++ object was deleted
+            return
+        except Exception:
+            return
+        try:
+            if hasattr(self, 'graphics_scene') and self.graphics_scene is not None:
+                self.graphics_scene.clearSelection()
+            item.setSelected(True)
+            # centerOn can crash during rapid resize/fullscreen; defer to event loop
+            QTimer.singleShot(0, lambda it=item: self._safe_center_on(it))
+        except RuntimeError:
+            # e.g., wrapped C++ object has been deleted
+            return
+        except Exception:
+            return
+
+    def _safe_center_on(self, item: QGraphicsItem):
+        """Center on item if still valid; separated to use in singleShot."""
+        try:
+            if item is None:
+                return
+            # Re-validate C++ object
+            if getattr(item, 'scene', None) is None:
+                return
+            if item.scene() is None:
+                return
+            self.centerOn(item)
+        except RuntimeError:
+            return
+        except Exception:
+            return
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fit_to_scene()
+        # Defer fit to avoid re-entrancy during fullscreen transitions
+        QTimer.singleShot(0, self._fit_to_scene)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._fit_to_scene()
+        # Defer initial fit until after show completes
+        QTimer.singleShot(0, self._fit_to_scene)
 
     def _fit_to_scene(self):
         if self._is_fitting:
@@ -518,7 +569,12 @@ class CanvasView(QGraphicsView):
             if hasattr(self, 'graphics_scene') and self.graphics_scene is not None:
                 rect = self.graphics_scene.sceneRect()
                 if rect.width() > 0 and rect.height() > 0:
-                    self.fitInView(rect, Qt.KeepAspectRatio)
+                    # Guard against rare crashes during rapid resizes/fullscreen toggles
+                    try:
+                        self.fitInView(rect, Qt.KeepAspectRatio)
+                    except RuntimeError:
+                        # Underlying view/scene not ready
+                        pass
         except (AttributeError, TypeError):
             # If there's any error, just return safely
             pass
@@ -596,10 +652,17 @@ class CanvasView(QGraphicsView):
                 continue
 
             # Add to scene
-            self.graphics_scene.addItem(item)
+            # Guard against adding invalid items during resize/fullscreen
+            try:
+                self.graphics_scene.addItem(item)
+            except RuntimeError:
+                continue
             if rotation_handle is not None:
                 for sub in rotation_handle.scene_items():
-                    self.graphics_scene.addItem(sub)
+                    try:
+                        self.graphics_scene.addItem(sub)
+                    except RuntimeError:
+                        continue
 
             self._items.append((kind, item, rotation_handle))
 
