@@ -1,0 +1,1 @@
+# Utils package for path editor application
