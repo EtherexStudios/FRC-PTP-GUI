@@ -1,0 +1,19 @@
+[
+  {
+    "type": "translation",
+    "x_meters": 7.36781818181818,
+    "y_meters": 2.4058787878787884
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 4.636212121212122,
+      "y_meters": 5.864242424242424
+    },
+    "rotation_target": {
+      "rotation_radians": 0.0,
+      "x_meters": 4.636212121212122,
+      "y_meters": 5.864242424242424
+    }
+  }
+]

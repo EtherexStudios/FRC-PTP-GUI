@@ -13,6 +13,7 @@ FIELD_LENGTH_METERS = 16.54
 FIELD_WIDTH_METERS = 8.21
 
 # Element visual constants (in meters)
+# Defaults; can be overridden at runtime from config
 ELEMENT_RECT_WIDTH_M = 0.60
 ELEMENT_RECT_HEIGHT_M = 0.60
 ELEMENT_CIRCLE_RADIUS_M = 0.20  # radius for circle elements
@@ -157,7 +158,9 @@ class RectElementItem(QGraphicsRectItem):
         self.canvas_view = canvas_view
         self.index_in_model = index_in_model
         # Local rect centered at origin so rotation occurs around center
-        self.setRect(QRectF(-ELEMENT_RECT_WIDTH_M / 2.0, -ELEMENT_RECT_HEIGHT_M / 2.0, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M))
+        rw = getattr(self.canvas_view, "robot_length_m", ELEMENT_RECT_WIDTH_M)
+        rh = getattr(self.canvas_view, "robot_width_m", ELEMENT_RECT_HEIGHT_M)
+        self.setRect(QRectF(-rw / 2.0, -rh / 2.0, rw, rh))
         self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
         # Pen/brush
         # Use thicker border for solid-outlined elements and thinner for dashed
@@ -185,7 +188,9 @@ class RectElementItem(QGraphicsRectItem):
     def _build_triangle(self, color: QColor):
         # Triangle pointing to +X in local coordinates (to the right)
         # Size relative to rect
-        base_size = min(ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M) * TRIANGLE_REL_SIZE
+        rw = getattr(self.canvas_view, "robot_length_m", ELEMENT_RECT_WIDTH_M)
+        rh = getattr(self.canvas_view, "robot_width_m", ELEMENT_RECT_HEIGHT_M)
+        base_size = min(rw, rh) * TRIANGLE_REL_SIZE
         half_base = base_size * 0.5
         height = base_size
         # Define a simple isosceles triangle centered at origin pointing right:
@@ -381,6 +386,10 @@ class CanvasView(QGraphicsView):
         self._rotation_t_cache: Optional[dict[int, float]] = None
         self._anchor_drag_in_progress: bool = False
 
+        # Robot element rectangle dimensions (configurable at runtime)
+        self.robot_length_m: float = ELEMENT_RECT_WIDTH_M
+        self.robot_width_m: float = ELEMENT_RECT_HEIGHT_M
+
         self.graphics_scene = QGraphicsScene(self)
         self.setScene(self.graphics_scene)
         self.graphics_scene.setSceneRect(0, 0, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS)
@@ -411,6 +420,17 @@ class CanvasView(QGraphicsView):
         self._path = path
         self._rebuild_items()
         # After rebuilding, ensure rotation items are properly positioned on their constraint lines
+        if self._path is not None:
+            self._reproject_rotation_items_in_scene()
+
+    def set_robot_dimensions(self, length_m: float, width_m: float):
+        # Update and rebuild items to apply new sizes
+        try:
+            self.robot_length_m = float(length_m)
+            self.robot_width_m = float(width_m)
+        except Exception:
+            return
+        self._rebuild_items()
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
 

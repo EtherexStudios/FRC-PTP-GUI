@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import math
 from PySide6.QtGui import QIcon
 from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+from typing import Any
 
 class ElementType(Enum):
     TRANSLATION = 'translation'
@@ -153,6 +154,8 @@ class Sidebar(QWidget):
         main_layout.addWidget(top_section)
 
         self.path = path
+        # Optional: set externally to access config defaults
+        self.project_manager = None
         
         self.points_list = CustomList()
         main_layout.addWidget(self.points_list)
@@ -488,6 +491,8 @@ class Sidebar(QWidget):
         QTimer.singleShot(0, lambda e=element: self._restore_last_opened_section(e))
 
         # Rotation already first in Core via metadata order; no row surgery required
+        # Ensure visible spin boxes reflect current config bounds if modified
+        self._refresh_spinner_metadata_bounds()
 
     def update_current_values_only(self):
         idx = self.get_selected_index()
@@ -522,6 +527,19 @@ class Sidebar(QWidget):
             set_spin_value('y_meters', element.y_meters)
             if element.rotation_radians is not None:
                 set_spin_value('rotation_degrees', math.degrees(element.rotation_radians))
+
+    def _refresh_spinner_metadata_bounds(self):
+        # If needed in the future: dynamically adjust ranges from config. For now, keep static.
+        # Hook to refresh UI on config change.
+        for name, (spin, label, btn, spin_row) in self.spinners.items():
+            meta = self.spinner_metadata.get(name, {})
+            rng = meta.get('range')
+            if rng and isinstance(rng, tuple) and len(rng) == 2:
+                try:
+                    spin.blockSignals(True)
+                    spin.setRange(float(rng[0]), float(rng[1]))
+                finally:
+                    spin.blockSignals(False)
 
     def _refresh_toolbox_sections(self, element):
         # Determine if translation/rotation limits have any visible rows
@@ -682,22 +700,40 @@ class Sidebar(QWidget):
         else:
             real_key = key
 
+        # Determine default value from config if available
+        cfg_default = None
+        try:
+            if getattr(self, 'project_manager', None) is not None:
+                cfg_default = self.project_manager.get_default_optional_value(real_key)
+        except Exception:
+            cfg_default = None
+
         if real_key in Sidebar.degrees_to_radians_attr_map:
             mapped = Sidebar.degrees_to_radians_attr_map[real_key]
-            # Initialize with 0 rad (0 deg)
+            # Default from config is in degrees; convert to radians
+            if cfg_default is None:
+                deg_val = 0.0
+            else:
+                deg_val = float(cfg_default)
+            rad_val = math.radians(deg_val)
             if isinstance(element, Waypoint):
                 if hasattr(element.rotation_target, mapped):
-                    setattr(element.rotation_target, mapped, 0.0)
+                    setattr(element.rotation_target, mapped, rad_val)
             elif hasattr(element, mapped):
-                setattr(element, mapped, 0.0)
+                setattr(element, mapped, rad_val)
         else:
-            if (isinstance(element, Waypoint)):
+            # Distance/velocity defaults use meters or m/s units
+            if cfg_default is None:
+                base_val = 0.0
+            else:
+                base_val = float(cfg_default)
+            if isinstance(element, Waypoint):
                 if hasattr(element.translation_target, real_key):
-                    setattr(element.translation_target, real_key, 0)
+                    setattr(element.translation_target, real_key, base_val)
                 if hasattr(element.rotation_target, real_key):
-                    setattr(element.rotation_target, real_key, 0)
+                    setattr(element.rotation_target, real_key, base_val)
             elif hasattr(element, real_key):
-                setattr(element, real_key, 0)
+                setattr(element, real_key, base_val)
         # Defer UI refresh to allow QMenu to close cleanly, then rebuild dropdown
         QTimer.singleShot(0, lambda e=element: self.expose_element(e))
         self.modelChanged.emit()
