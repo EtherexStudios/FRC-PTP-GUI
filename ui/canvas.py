@@ -15,6 +15,7 @@ FIELD_WIDTH_METERS = 8.21
 # Element visual constants (in meters)
 ELEMENT_RECT_WIDTH_M = 0.60
 ELEMENT_RECT_HEIGHT_M = 0.60
+ELEMENT_CIRCLE_RADIUS_M = 0.20  # radius for circle elements
 TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
 OUTLINE_THIN_M = 0.06     # thin outline (e.g., rotation dashed)
 OUTLINE_THICK_M = 0.06    # thicker outline (e.g., translation aesthetic)
@@ -23,6 +24,121 @@ HANDLE_LINK_THICKNESS_M = 0.03
 HANDLE_RADIUS_M = 0.12
 HANDLE_DISTANCE_M = 0.70
 OUTLINE_EDGE_PEN = QPen(QColor("#222222"), 0.02)
+
+
+class CircleElementItem(QGraphicsEllipseItem):
+    def __init__(
+        self,
+        canvas_view: 'CanvasView',
+        center_m: QPointF,
+        index_in_model: int,
+        *,
+        filled_color: Optional[QColor],
+        outline_color: Optional[QColor],
+        dashed_outline: bool,
+        triangle_color: Optional[QColor],
+    ):
+        super().__init__()
+        self.canvas_view = canvas_view
+        self.index_in_model = index_in_model
+        # Local rect centered at origin so rotation occurs around center
+        self.setRect(QRectF(-ELEMENT_CIRCLE_RADIUS_M, -ELEMENT_CIRCLE_RADIUS_M, ELEMENT_CIRCLE_RADIUS_M * 2, ELEMENT_CIRCLE_RADIUS_M * 2))
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+        # Pen/brush
+        # Use thicker border for solid-outlined elements and thinner for dashed
+        thickness = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
+        pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
+                   thickness if outline_color is not None else 0.0)
+        if dashed_outline:
+            pen.setStyle(Qt.DashLine)
+        self.setPen(pen)
+        if filled_color is not None:
+            self.setBrush(QBrush(filled_color))
+        else:
+            self.setBrush(Qt.NoBrush)
+        # Interactivity flags
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setZValue(10)
+        # Inscribed triangle as child so it rotates/moves with parent (only if triangle_color is provided)
+        self.triangle_item = None
+        if triangle_color is not None:
+            self.triangle_item = QGraphicsPolygonItem(self)
+            self._build_triangle(triangle_color)
+        # Current rotation in model radians (y-up)
+        self._angle_radians: float = 0.0
+
+    def _build_triangle(self, color: QColor):
+        if self.triangle_item is None:
+            return
+        # Triangle pointing to +X in local coordinates (to the right)
+        # Size relative to circle diameter
+        base_size = ELEMENT_CIRCLE_RADIUS_M * 2 * TRIANGLE_REL_SIZE
+        half_base = base_size * 0.5
+        height = base_size
+        # Define a simple isosceles triangle centered at origin pointing right:
+        # points: tip at (height/2, 0), back upper (-height/2, half_base), back lower (-height/2, -half_base)
+        points = [
+            QPointF(height / 2.0, 0.0),
+            QPointF(-height / 2.0, half_base),
+            QPointF(-height / 2.0, -half_base),
+        ]
+        polygon = QPolygonF(points)
+        self.triangle_item.setPolygon(polygon)
+        self.triangle_item.setBrush(QBrush(color))
+        self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+        self.triangle_item.setZValue(self.zValue() + 1)
+
+    def set_center(self, center_m: QPointF):
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+
+    def set_angle_radians(self, radians: float):
+        self._angle_radians = radians
+        # Convert model (y-up) to scene (y-down) and set degrees
+        angle_scene = -radians
+        self.setRotation(math.degrees(angle_scene))
+
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_pos: QPointF = value
+            # Safety check for canvas_view reference
+            if not hasattr(self, 'canvas_view') or self.canvas_view is None:
+                return value
+            # Constrain movement based on element type and neighbors
+            try:
+                cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
+                return QPointF(cx, cy)
+            except (AttributeError, TypeError, IndexError):
+                return value
+        elif change == QGraphicsItem.ItemPositionHasChanged:
+            # Now that the item's position is committed, notify for visual updates and model sync
+            if not getattr(self.canvas_view, "_suppress_live_events", False):
+                try:
+                    x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+                    self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+                except (AttributeError, TypeError):
+                    pass
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        # Prepare for potential drag
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_pressed(self.index_in_model)
+                self.canvas_view._on_item_clicked(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Clear any drag state
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_released(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mouseReleaseEvent(event)
 
 
 class RectElementItem(QGraphicsRectItem):
@@ -97,25 +213,42 @@ class RectElementItem(QGraphicsRectItem):
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
             new_pos: QPointF = value
+            # Safety check for canvas_view reference
+            if not hasattr(self, 'canvas_view') or self.canvas_view is None:
+                return value
             # Constrain movement based on element type and neighbors
-            cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
-            return QPointF(cx, cy)
+            try:
+                cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
+                return QPointF(cx, cy)
+            except (AttributeError, TypeError, IndexError):
+                return value
         elif change == QGraphicsItem.ItemPositionHasChanged:
             # Now that the item's position is committed, notify for visual updates and model sync
             if not getattr(self.canvas_view, "_suppress_live_events", False):
-                x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
-                self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+                try:
+                    x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+                    self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+                except (AttributeError, TypeError):
+                    pass
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
         # Prepare for potential drag
-        self.canvas_view._on_item_pressed(self.index_in_model)
-        self.canvas_view._on_item_clicked(self.index_in_model)
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_pressed(self.index_in_model)
+                self.canvas_view._on_item_clicked(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         # Clear any drag state
-        self.canvas_view._on_item_released(self.index_in_model)
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_released(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
         super().mouseReleaseEvent(event)
 
 
@@ -156,6 +289,8 @@ class RotationHandle(QGraphicsEllipseItem):
         # Programmatic sync: suppress re-entrant rotation notifications
         self._syncing = True
         try:
+            if not hasattr(self, 'center_item') or self.center_item is None:
+                return
             cx = self.center_item.pos().x()
             cy = self.center_item.pos().y()
             # Convert model angle (y-up) to scene (y-down)
@@ -164,49 +299,60 @@ class RotationHandle(QGraphicsEllipseItem):
             hy = cy + math.sin(angle_scene) * self.handle_distance_m
             self.setPos(QPointF(hx, hy))
             self.link_line.setLine(cx, cy, hx, hy)
+        except (AttributeError, TypeError):
+            pass
         finally:
             self._syncing = False
 
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         if change == QGraphicsItem.ItemPositionChange:
             new_center: QPointF = value
-            cx = self.center_item.pos().x()
-            cy = self.center_item.pos().y()
-            dx = new_center.x() - cx
-            dy = new_center.y() - cy
-            angle_scene = math.atan2(dy, dx)
-            # Constrain to ring distance by returning the adjusted position
-            hx = cx + math.cos(angle_scene) * self.handle_distance_m
-            hy = cy + math.sin(angle_scene) * self.handle_distance_m
-            self.link_line.setLine(cx, cy, hx, hy)
-            # Convert to model angle (y-up)
-            angle_model = -angle_scene
-            self._angle_radians = angle_model
-            # Only notify the canvas when the user is actively dragging
-            if not self._syncing and self._dragging:
-                self.canvas_view._on_item_live_rotated(self.center_item.index_in_model, angle_model)
-            return QPointF(hx, hy)
+            try:
+                if not hasattr(self, 'center_item') or self.center_item is None:
+                    return value
+                cx = self.center_item.pos().x()
+                cy = self.center_item.pos().y()
+                dx = new_center.x() - cx
+                dy = new_center.y() - cy
+                angle_scene = math.atan2(dy, dx)
+                # Constrain to ring distance by returning the adjusted position
+                hx = cx + math.cos(angle_scene) * self.handle_distance_m
+                hy = cy + math.sin(angle_scene) * self.handle_distance_m
+                self.link_line.setLine(cx, cy, hx, hy)
+                # Convert to model angle (y-up)
+                angle_model = -angle_scene
+                self._angle_radians = angle_model
+                # Only notify the canvas when the user is actively dragging
+                if not self._syncing and self._dragging:
+                    if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                        self.canvas_view._on_item_live_rotated(self.center_item.index_in_model, angle_model)
+                return QPointF(hx, hy)
+            except (AttributeError, TypeError, IndexError):
+                return value
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
         # On rotation start, select the associated center item and clear any previous selection
         # This prevents previously-selected items from being dragged inadvertently
         try:
-            if self.canvas_view and self.canvas_view.graphics_scene:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None and self.canvas_view.graphics_scene:
                 self.canvas_view.graphics_scene.clearSelection()
-            if self.center_item:
+            if hasattr(self, 'center_item') and self.center_item is not None:
                 self.center_item.setSelected(True)
                 # Notify outside listeners of selection change (sidebar, etc.)
-                self.canvas_view._on_item_clicked(self.center_item.index_in_model)
+                if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                    self.canvas_view._on_item_clicked(self.center_item.index_in_model)
         except Exception:
             pass
         # Prevent center item from moving while rotating
-        self.center_item.setFlag(QGraphicsItem.ItemIsMovable, False)
+        if hasattr(self, 'center_item') and self.center_item is not None:
+            self.center_item.setFlag(QGraphicsItem.ItemIsMovable, False)
         self._dragging = True
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self.center_item.setFlag(QGraphicsItem.ItemIsMovable, True)
+        if hasattr(self, 'center_item') and self.center_item is not None:
+            self.center_item.setFlag(QGraphicsItem.ItemIsMovable, True)
         self._dragging = False
         super().mouseReleaseEvent(event)
 
@@ -270,27 +416,31 @@ class CanvasView(QGraphicsView):
 
     def refresh_from_model(self):
         # Update item positions and angles from model without rebuilding structure
-        if self._path is None:
+        if self._path is None or not self._items:
             return
         self._suppress_live_events = True
         try:
             count = min(len(self._items), len(self._path.path_elements))
             for i in range(count):
-                kind, item, handle = self._items[i]
-                element = self._path.path_elements[i]
-                pos = self._element_position(element)
-                item.set_center(QPointF(pos[0], pos[1]))
-                # Set rotation for waypoint/rotation; translation uses previous orientation source
-                if kind in ("rotation", "waypoint"):
-                    angle = self._element_rotation(element)
-                else:
-                    angle = self._angle_for_translation_index(i)
-                item.set_angle_radians(angle)
-                if handle is not None:
-                    handle.set_angle(angle)
-                    # Ensure rotation handle is properly synchronized
-                    if kind == "rotation":
-                        handle.sync_to_angle()
+                try:
+                    kind, item, handle = self._items[i]
+                    element = self._path.path_elements[i]
+                    pos = self._element_position(element)
+                    item.set_center(QPointF(pos[0], pos[1]))
+                    # Set rotation for waypoint/rotation; translation uses previous orientation source
+                    if kind in ("rotation", "waypoint"):
+                        angle = self._element_rotation(element)
+                    else:
+                        angle = self._angle_for_translation_index(i)
+                    item.set_angle_radians(angle)
+                    if handle is not None:
+                        handle.set_angle(angle)
+                        # Ensure rotation handle is properly synchronized
+                        if kind == "rotation":
+                            handle.sync_to_angle()
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
         finally:
             self._suppress_live_events = False
         self._update_connecting_lines()
@@ -300,7 +450,7 @@ class CanvasView(QGraphicsView):
 
     def refresh_rotations_from_model(self):
         # Update only rotation items from the model
-        if self._path is None:
+        if self._path is None or not self._items:
             return
         max_index = len(self._path.path_elements) - 1
         for i, (kind, item, handle) in enumerate(self._items):
@@ -308,15 +458,19 @@ class CanvasView(QGraphicsView):
                 break
             if kind != 'rotation':
                 continue
-            element = self._path.path_elements[i]
-            pos = self._element_position(element)
-            item.set_center(QPointF(pos[0], pos[1]))
-            if handle is not None:
-                angle = self._element_rotation(element)
-                item.set_angle_radians(angle)
-                handle.set_angle(angle)
-                # Ensure rotation handle is properly synchronized
-                handle.sync_to_angle()
+            try:
+                element = self._path.path_elements[i]
+                pos = self._element_position(element)
+                item.set_center(QPointF(pos[0], pos[1]))
+                if handle is not None:
+                    angle = self._element_rotation(element)
+                    item.set_angle_radians(angle)
+                    handle.set_angle(angle)
+                    # Ensure rotation handle is properly synchronized
+                    handle.sync_to_angle()
+            except (IndexError, TypeError, AttributeError):
+                # Skip invalid items to prevent crashes
+                continue
         self._update_connecting_lines()
 
     def select_index(self, index: int):
@@ -341,9 +495,13 @@ class CanvasView(QGraphicsView):
             return
         self._is_fitting = True
         try:
-            rect = self.graphics_scene.sceneRect()
-            if rect.width() > 0 and rect.height() > 0:
-                self.fitInView(rect, Qt.KeepAspectRatio)
+            if hasattr(self, 'graphics_scene') and self.graphics_scene is not None:
+                rect = self.graphics_scene.sceneRect()
+                if rect.width() > 0 and rect.height() > 0:
+                    self.fitInView(rect, Qt.KeepAspectRatio)
+        except (AttributeError, TypeError):
+            # If there's any error, just return safely
+            pass
         finally:
             self._is_fitting = False
 
@@ -370,14 +528,14 @@ class CanvasView(QGraphicsView):
             # Choose visuals by element type
             if isinstance(element, TranslationTarget):
                 kind = "translation"
-                item = RectElementItem(
+                item = CircleElementItem(
                     self,
                     QPointF(pos[0], pos[1]),
                     i,
-                    filled_color=None,
+                    filled_color=QColor("#3aa3ff"),
                     outline_color=QColor("#3aa3ff"),
                     dashed_outline=False,
-                    triangle_color=QColor("#3aa3ff"),
+                    triangle_color=None,
                 )
                 rotation_handle = None
                 item.set_angle_radians(self._angle_for_translation_index(i))
@@ -456,28 +614,60 @@ class CanvasView(QGraphicsView):
 
     def _build_connecting_lines(self):
         self._connect_lines = []
-        for i in range(len(self._items) - 1):
-            _, a, _ = self._items[i]
-            _, b, _ = self._items[i + 1]
-            line = QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
-            line.setPen(QPen(QColor("#cccccc"), CONNECT_LINE_THICKNESS_M))
-            line.setZValue(5)
-            self.graphics_scene.addItem(line)
-            self._connect_lines.append(line)
+        if not self._items:
+            return
+        try:
+            for i in range(len(self._items) - 1):
+                try:
+                    _, a, _ = self._items[i]
+                    _, b, _ = self._items[i + 1]
+                    if a is not None and b is not None:
+                        line = QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
+                        line.setPen(QPen(QColor("#cccccc"), CONNECT_LINE_THICKNESS_M))
+                        line.setZValue(5)
+                        self.graphics_scene.addItem(line)
+                        self._connect_lines.append(line)
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
+        except (IndexError, TypeError):
+            # If there's any error, just return safely
+            pass
 
     def _update_connecting_lines(self):
-        for i in range(len(self._connect_lines)):
-            _, a, _ = self._items[i]
-            _, b, _ = self._items[i + 1]
-            self._connect_lines[i].setLine(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
+        if not self._items or not self._connect_lines:
+            return
+        try:
+            for i in range(len(self._connect_lines)):
+                if i >= len(self._items) - 1:
+                    break
+                try:
+                    _, a, _ = self._items[i]
+                    _, b, _ = self._items[i + 1]
+                    if a is not None and b is not None:
+                        self._connect_lines[i].setLine(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
+        except (IndexError, TypeError):
+            # If there's any error, just return safely
+            pass
 
     # Live updates while dragging/rotating for visuals, and emit changes out for model syncing
     def _on_item_live_moved(self, index: int, x_m: float, y_m: float):
+        # Safety check to prevent segmentation faults
+        if index < 0 or index >= len(self._items):
+            return
+            
         self._update_connecting_lines()
         # Keep rotation handle linked to moved point
-        kind, _, handle = self._items[index]
-        if handle is not None:
-            handle.sync_to_angle()
+        try:
+            kind, _, handle = self._items[index]
+            if handle is not None:
+                handle.sync_to_angle()
+        except (IndexError, TypeError):
+            return
+            
         # Emit move for the item being dragged first so model updates promptly
         self.elementMoved.emit(index, x_m, y_m)
         # If an anchor moved, reproject any rotation items so they stay inline in real-time
@@ -485,18 +675,29 @@ class CanvasView(QGraphicsView):
             self._reproject_rotation_items_in_scene()
 
     def _on_item_live_rotated(self, index: int, angle_radians: float):
+        # Safety check to prevent segmentation faults
+        if index < 0 or index >= len(self._items):
+            return
+            
         # Update visual rotation immediately
-        kind, item, handle = self._items[index]
-        if kind in ("rotation", "waypoint"):
-            item.set_angle_radians(angle_radians)
-            if handle is not None:
-                handle.set_angle(angle_radians)
+        try:
+            kind, item, handle = self._items[index]
+            if kind in ("rotation", "waypoint"):
+                item.set_angle_radians(angle_radians)
+                if handle is not None:
+                    handle.set_angle(angle_radians)
+        except (IndexError, TypeError):
+            return
+            
         self.elementRotated.emit(index, angle_radians)
         # Also update orientations of translation elements that depend on this orientation source
         # A translation's orientation is taken from the nearest previous rotation/waypoint
         for j, (k, it, _) in enumerate(self._items):
             if k == 'translation':
-                it.set_angle_radians(self._angle_for_translation_index(j))
+                try:
+                    it.set_angle_radians(self._angle_for_translation_index(j))
+                except (AttributeError, TypeError):
+                    continue
 
     def _on_item_clicked(self, index: int):
         self.elementSelected.emit(index)
@@ -518,7 +719,11 @@ class CanvasView(QGraphicsView):
         x_s, y_s = self._clamp_scene_coords(x_s, y_s)
         if index < 0 or index >= len(self._items):
             return x_s, y_s
-        kind, _, _ = self._items[index]
+        try:
+            kind, _, _ = self._items[index]
+        except (IndexError, TypeError):
+            return x_s, y_s
+            
         # Only constrain rotation elements along line segment between nearest translation/waypoint neighbors
         if kind != 'rotation':
             return x_s, y_s
@@ -547,16 +752,22 @@ class CanvasView(QGraphicsView):
         # Search upward for nearest translation/waypoint
         prev_pos: Optional[Tuple[float, float]] = None
         for i in range(index - 1, -1, -1):
-            kind, item, _ = self._items[i]
-            if kind in ('translation', 'waypoint'):
-                prev_pos = (item.pos().x(), item.pos().y())
-                break
+            try:
+                kind, item, _ = self._items[i]
+                if kind in ('translation', 'waypoint'):
+                    prev_pos = (item.pos().x(), item.pos().y())
+                    break
+            except (IndexError, TypeError, AttributeError):
+                continue
         next_pos: Optional[Tuple[float, float]] = None
         for i in range(index + 1, len(self._items)):
-            kind, item, _ = self._items[i]
-            if kind in ('translation', 'waypoint'):
-                next_pos = (item.pos().x(), item.pos().y())
-                break
+            try:
+                kind, item, _ = self._items[i]
+                if kind in ('translation', 'waypoint'):
+                    next_pos = (item.pos().x(), item.pos().y())
+                    break
+            except (IndexError, TypeError, AttributeError):
+                continue
         return prev_pos, next_pos
 
     def _reproject_rotation_items_in_scene(self):
@@ -584,7 +795,10 @@ class CanvasView(QGraphicsView):
                     t = self._rotation_t_cache[i]
                 else:
                     # Use current scene position for t calculation to ensure accurate positioning
-                    rx, ry = item.pos().x(), item.pos().y()
+                    try:
+                        rx, ry = item.pos().x(), item.pos().y()
+                    except (AttributeError, TypeError):
+                        continue
                     t = ((rx - ax) * dx + (ry - ay) * dy) / denom
                     if t < 0.0:
                         t = 0.0
@@ -593,9 +807,12 @@ class CanvasView(QGraphicsView):
                 proj_x = ax + t * dx
                 proj_y = ay + t * dy
                 # Move without emitting signals
-                item.setPos(proj_x, proj_y)
-                if handle is not None:
-                    handle.sync_to_angle()
+                try:
+                    item.setPos(proj_x, proj_y)
+                    if handle is not None:
+                        handle.sync_to_angle()
+                except (AttributeError, TypeError):
+                    continue
             # Update connecting lines once after all moves
             self._update_connecting_lines()
         finally:
