@@ -142,6 +142,11 @@ class MainWindow(QMainWindow):
         self.action_save_as.triggered.connect(self._action_save_as)
         path_menu.addAction(self.action_save_as)
         
+        # Rename Path action
+        self.action_rename_path = QAction("Rename Path…", self)
+        self.action_rename_path.triggered.connect(self._action_rename_path)
+        path_menu.addAction(self.action_rename_path)
+        
         # Delete Path action (opens dialog)
         self.action_delete_path = QAction("Delete Paths...", self)
         self.action_delete_path.triggered.connect(self._show_delete_path_dialog)
@@ -416,6 +421,64 @@ class MainWindow(QMainWindow):
         else:
             # No project open, just show the empty path
             print("No project open - showing empty path")
+
+    def _action_rename_path(self):
+        """Rename the currently open path file"""
+        if not self.project_manager.has_valid_project():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+            
+        if not self.project_manager.current_path_file:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Path", "No path is currently open to rename.")
+            return
+        
+        # Get current filename without extension
+        current_name = self.project_manager.current_path_file
+        if current_name.endswith('.json'):
+            current_name = current_name[:-5]
+        
+        # Prompt user for new filename
+        from PySide6.QtWidgets import QInputDialog
+        new_filename, ok = QInputDialog.getText(
+            self, "Rename Path", 
+            f"Enter new name for '{current_name}':", 
+            text=current_name
+        )
+        
+        if ok and new_filename:
+            # Add .json extension if not present
+            if not new_filename.endswith('.json'):
+                new_filename += '.json'
+            
+            # Check if new filename already exists
+            if new_filename != self.project_manager.current_path_file:
+                if os.path.exists(os.path.join(self.project_manager.project_dir, "paths", new_filename)):
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "File Exists", f"A path named '{new_filename}' already exists. Please choose a different name.")
+                    return
+                
+                # Rename the file
+                try:
+                    old_path = os.path.join(self.project_manager.project_dir, "paths", self.project_manager.current_path_file)
+                    new_path = os.path.join(self.project_manager.project_dir, "paths", new_filename)
+                    os.rename(old_path, new_path)
+                    
+                    # Update the project manager's current path file
+                    self.project_manager.current_path_file = new_filename
+                    self.project_manager.settings.setValue(self.project_manager.KEY_LAST_PATH_FILE, new_filename)
+                    
+                    # Update the UI
+                    self._update_current_path_display()
+                    self._populate_load_path_menu()
+                    
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.information(self, "Path Renamed", f"Successfully renamed to '{new_filename}'")
+                    
+                except Exception as e:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(self, "Rename Failed", f"Failed to rename path: {str(e)}")
 
     def _delete_paths_from_dialog(self, checkboxes: dict, dialog: QDialog):
         """Delete the selected paths from the dialog after confirmation"""

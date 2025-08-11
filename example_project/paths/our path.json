@@ -7,13 +7,13 @@
   {
     "type": "waypoint",
     "translation_target": {
-      "x_meters": 6.165606060606061,
-      "y_meters": 3.690696969696969
+      "x_meters": 8.05,
+      "y_meters": 4.84
     },
     "rotation_target": {
       "rotation_radians": 0.0,
-      "x_meters": 6.165606060606061,
-      "y_meters": 3.690696969696969
+      "x_meters": 8.05,
+      "y_meters": 4.84
     }
   },
   {
