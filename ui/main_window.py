@@ -174,6 +174,9 @@ class MainWindow(QMainWindow):
             self.menu_load_path.addAction(a)
             return
         for fname in files:
+            # Skip the currently opened path
+            if fname == self.project_manager.current_path_file:
+                continue
             act = QAction(fname, self)
             act.triggered.connect(lambda checked=False, f=fname: self._load_path_file(f))
             self.menu_load_path.addAction(act)
@@ -362,7 +365,8 @@ class MainWindow(QMainWindow):
                 return
         base_dir = self.project_manager.get_paths_dir()
         suggested = self.project_manager.current_path_file or "untitled.json"
-        file_tuple = QFileDialog.getSaveFileName(self, "Save Path As", _os.path.join(base_dir, suggested), "JSON Files (*.json)")
+        # Use global os for initial join to avoid unbound local
+        file_tuple = QFileDialog.getSaveFileName(self, "Save Path As", os.path.join(base_dir, suggested), "JSON Files (*.json)")
         filepath = file_tuple[0]
         if not filepath:
             return
@@ -381,6 +385,8 @@ class MainWindow(QMainWindow):
             import os as _os
             filename = _os.path.basename(filepath)
             self.project_manager.save_path(self.path, filename)
+            # Auto-open the newly saved path
+            self._load_path_file(filename)
         except Exception:
             pass
 
