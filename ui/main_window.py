@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
                     self.sidebar.set_suspended(False)
                 except Exception:
                     pass
-            QTimer.singleShot(300, _clear)
+            QTimer.singleShot(1000, _clear)
         super().changeEvent(event)
 
     def showEvent(self, event):

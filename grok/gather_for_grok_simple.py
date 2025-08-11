@@ -52,7 +52,7 @@ def create_simple_prompt():
     
     project_files = gather_project_files()
     
-    prompt = """# FRC-PTP-GUI Project Analysis
+    prompt = """# FRC-PTP-GUI Project Repository
 
 ## Project Description
 This is a Python GUI application for FRC (FIRST Robotics Competition) path planning and trajectory optimization using PySide6.
@@ -64,7 +64,7 @@ This is a Python GUI application for FRC (FIRST Robotics Competition) path plann
 - utils/ - Utilities (project_manager.py)
 - example_project/ - Example configuration and path files
 
-## Files to Analyze
+## Repository Contents
 
 """
     
@@ -74,19 +74,6 @@ This is a Python GUI application for FRC (FIRST Robotics Competition) path plann
         prompt += f"### {file_path}\n"
         prompt += f"```\n{content}\n```\n\n"
     
-    prompt += """## Analysis Request
-Please analyze this FRC robotics path planning GUI application and provide:
-1. Code architecture overview
-2. Key components and their roles
-3. Data flow analysis
-4. UI structure analysis
-5. Path management approach
-6. Improvement suggestions
-7. Dependencies and usage instructions
-
-Provide a comprehensive analysis suitable for understanding and improving this application.
-"""
-    
     return prompt
 
 def main():
@@ -95,18 +82,21 @@ def main():
     
     prompt = create_simple_prompt()
     
-    # Save simplified prompt
+    # Save simplified prompt in /grok directory
+    grok_dir = Path("grok")
+    grok_dir.mkdir(exist_ok=True)
+    
     try:
-        with open("grok_simple.txt", 'w', encoding='utf-8') as f:
+        with open(grok_dir / "grok_simple.txt", 'w', encoding='utf-8') as f:
             f.write(prompt)
-        print(f"✅ Simplified prompt saved to grok_simple.txt")
+        print(f"✅ Simplified prompt saved to grok/grok_simple.txt")
         print(f"📝 Length: {len(prompt)} characters")
         
         # Show file sizes for reference
         project_files = gather_project_files()
         print(f"📁 Total files gathered: {len(project_files)}")
         
-        # Create a summary file
+        # Create a summary file in /grok directory
         summary = {
             "project": "FRC-PTP-GUI",
             "description": "Python GUI for FRC path planning",
@@ -114,9 +104,9 @@ def main():
             "total_files": len(project_files)
         }
         
-        with open("grok_summary.json", 'w', encoding='utf-8') as f:
+        with open(grok_dir / "grok_summary.json", 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2)
-        print("📋 Summary saved to grok_summary.json")
+        print("📋 Summary saved to grok/grok_summary.json")
         
     except Exception as e:
         print(f"❌ Error: {e}")

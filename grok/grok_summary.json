@@ -1,0 +1,24 @@
+{
+  "project": "FRC-PTP-GUI",
+  "description": "Python GUI for FRC path planning",
+  "files": [
+    "python:main.py",
+    "python:ui/main_window.py",
+    "python:ui/sidebar.py",
+    "python:ui/config_dialog.py",
+    "python:ui/canvas.py",
+    "python:utils/temp.py",
+    "python:utils/project_manager.py",
+    "python:models/path_model.py",
+    "python:grok/gather_for_grok_simple.py",
+    "example:config.json",
+    "example:README.md",
+    "example:paths/new simple.json",
+    "example:paths/bllll.json",
+    "example:paths/simple_path.json",
+    "example:paths/sdofij.json",
+    "example:paths/our path.json",
+    "example:paths/untitled.json"
+  ],
+  "total_files": 17
+}

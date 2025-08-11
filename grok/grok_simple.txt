@@ -1,0 +1,4007 @@
+# FRC-PTP-GUI Project Repository
+
+## Project Description
+This is a Python GUI application for FRC (FIRST Robotics Competition) path planning and trajectory optimization using PySide6.
+
+## Project Structure
+- main.py - Application entry point
+- ui/ - User interface components (main_window.py, sidebar.py, canvas.py, config_dialog.py)
+- models/ - Data models (path_model.py)
+- utils/ - Utilities (project_manager.py)
+- example_project/ - Example configuration and path files
+
+## Repository Contents
+
+### main.py
+```
+import faulthandler
+faulthandler.enable()
+
+import sys
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow  # Import your class
+
+app = QApplication(sys.argv)
+window = MainWindow()  # Use custom class
+window.show()
+sys.exit(app.exec())
+```
+
+### ui/main_window.py
+```
+from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog
+from PySide6.QtGui import QAction
+import math
+import os
+from .sidebar import Sidebar
+from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
+from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+from typing import Tuple
+from PySide6.QtCore import Qt, QTimer, QEvent
+from utils.project_manager import ProjectManager
+from .config_dialog import ConfigDialog
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()  # Call parent init
+        self.setWindowTitle("FRC Path Editor")
+        self.resize(1000, 600)
+        self.project_manager = ProjectManager()
+        self.path = Path()  # start empty; will be replaced on project load
+
+        central = QWidget()  # Blank container for content
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)  # Horizontal split
+
+        # Canvas (left)
+        # Initialize canvas with default robot dims; will update after config load
+        self.canvas = CanvasView()
+        layout.addWidget(self.canvas, stretch=3)  # Wider
+
+        # Placeholder for sidebar (right)
+        self.sidebar = Sidebar()
+        # Provide project manager to sidebar for config defaults
+        self.sidebar.project_manager = self.project_manager
+        self.sidebar.set_path(self.path)
+        layout.addWidget(self.sidebar, stretch=1)  # Narrower
+
+        # Initialize canvas with path
+        self.canvas.set_path(self.path)
+
+        # Wire up interactions: sidebar <-> canvas
+        self.sidebar.elementSelected.connect(self.canvas.select_index, Qt.QueuedConnection)
+        self.canvas.elementSelected.connect(self.sidebar.select_index, Qt.QueuedConnection)
+
+        # Sidebar changes -> canvas refresh
+        self.sidebar.modelChanged.connect(self.canvas.refresh_from_model)
+        self.sidebar.modelStructureChanged.connect(lambda: self.canvas.set_path(self.path))
+
+        # Canvas interactions -> update model and sidebar
+        self.canvas.elementMoved.connect(self._on_canvas_element_moved, Qt.QueuedConnection)
+        self.canvas.elementRotated.connect(self._on_canvas_element_rotated, Qt.QueuedConnection)
+        # Handle end-of-drag to fix rotation ordering once user releases
+        self.canvas.elementDragFinished.connect(self._on_canvas_drag_finished, Qt.QueuedConnection)
+
+        # Auto-save debounce timer
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(300)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+
+        # Hook autosave on model changes
+        self.sidebar.modelChanged.connect(self._schedule_autosave)
+        self.sidebar.modelStructureChanged.connect(self._schedule_autosave)
+        self.canvas.elementDragFinished.connect(self._schedule_autosave)
+
+        # Build menubar
+        self._build_menu_bar()
+        
+        # Create status bar for current path display
+        self.statusBar = self.statusBar()
+        self.statusBar.showMessage("No path loaded")
+
+        # Startup: load last project or prompt
+        QTimer.singleShot(0, self._startup_load)
+
+        # Stabilization flag for fullscreen/window state transitions
+        self._layout_stabilizing: bool = False
+        # Mark sidebar ready after initial layout
+        QTimer.singleShot(0, self.sidebar.mark_ready)
+
+    def changeEvent(self, event):
+        # Detect window state changes (e.g., entering/exiting fullscreen) and
+        # enable a brief stabilization window to avoid re-entrant UI churn.
+        if event.type() == QEvent.WindowStateChange:
+            self._layout_stabilizing = True
+            try:
+                self.sidebar.set_suspended(True)
+            except Exception:
+                pass
+            # Clear after a short delay once layout settles
+            def _clear():
+                setattr(self, '_layout_stabilizing', False)
+                try:
+                    self.sidebar.set_suspended(False)
+                except Exception:
+                    pass
+            QTimer.singleShot(300, _clear)
+        super().changeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Mark sidebar ready after the window is shown
+        QTimer.singleShot(0, self.sidebar.mark_ready)
+
+    # ---------------- Menu Bar ----------------
+    def _build_menu_bar(self):
+        bar: QMenuBar = self.menuBar()
+        # Ensure menu bar is visible
+        bar.setVisible(True)
+        bar.setNativeMenuBar(False)  # Force Qt menu bar instead of native macOS menu
+        
+        # Project menu - for opening and managing projects
+        project_menu: QMenu = bar.addMenu("Project")
+        self.action_open_project = QAction("Open Project…", self)
+        self.action_open_project.triggered.connect(self._action_open_project)
+        project_menu.addAction(self.action_open_project)
+        
+        # Recent Projects submenu
+        self.menu_recent_projects: QMenu = project_menu.addMenu("Recent Projects")
+        self.menu_recent_projects.aboutToShow.connect(self._populate_recent_projects)
+        
+        # Path menu - for managing paths
+        path_menu: QMenu = bar.addMenu("Path")
+        
+        # Current Path display (read-only)
+        self.action_current_path = QAction("Current: (No Path)", self)
+        self.action_current_path.setEnabled(False)  # Make it read-only
+        path_menu.addAction(self.action_current_path)
+        
+        path_menu.addSeparator()  # Add a separator line
+        
+        # Load Path submenu (dynamic)
+        self.menu_load_path: QMenu = path_menu.addMenu("Load Path")
+        self.menu_load_path.aboutToShow.connect(self._populate_load_path_menu)
+
+        # Create New Path action
+        self.action_new_path = QAction("Create New Path", self)
+        self.action_new_path.triggered.connect(self._action_create_new_path)
+        path_menu.addAction(self.action_new_path)
+
+        # Save As…
+        self.action_save_as = QAction("Save Path As…", self)
+        self.action_save_as.triggered.connect(self._action_save_as)
+        path_menu.addAction(self.action_save_as)
+        
+        # Rename Path action
+        self.action_rename_path = QAction("Rename Path…", self)
+        self.action_rename_path.triggered.connect(self._action_rename_path)
+        path_menu.addAction(self.action_rename_path)
+        
+        # Delete Path action (opens dialog)
+        self.action_delete_path = QAction("Delete Paths...", self)
+        self.action_delete_path.triggered.connect(self._show_delete_path_dialog)
+        path_menu.addAction(self.action_delete_path)
+        
+        # Settings menu - for configuration
+        settings_menu: QMenu = bar.addMenu("Settings")
+        self.action_edit_config = QAction("Edit Config…", self)
+        self.action_edit_config.triggered.connect(self._action_edit_config)
+        settings_menu.addAction(self.action_edit_config)
+        
+        # Debug: print menu bar info
+        print(f"Menu bar created: {bar.isVisible()}, {bar.height()}, {bar.width()}")
+        print(f"Menu bar actions: {[action.text() for action in bar.actions()]}")
+        # Force menu bar to be visible and sized properly
+        self.menuBar().setVisible(True)
+        self.menuBar().setMinimumHeight(30)
+
+    def _populate_load_path_menu(self):
+        self.menu_load_path.clear()
+        files = self.project_manager.list_paths()
+        if not files:
+            a = QAction("(No paths)", self)
+            a.setEnabled(False)
+            self.menu_load_path.addAction(a)
+            return
+        for fname in files:
+            # Skip the currently opened path
+            if fname == self.project_manager.current_path_file:
+                continue
+            act = QAction(fname, self)
+            act.triggered.connect(lambda checked=False, f=fname: self._load_path_file(f))
+            self.menu_load_path.addAction(act)
+
+    def _populate_recent_projects(self):
+        self.menu_recent_projects.clear()
+        recents = self.project_manager.recent_projects()
+        if not recents:
+            a = QAction("(No recent projects)", self)
+            a.setEnabled(False)
+            self.menu_recent_projects.addAction(a)
+            return
+        for d in recents:
+            label = d
+            act = QAction(label, self)
+            act.triggered.connect(lambda checked=False, dirpath=d: self._open_recent_project(dirpath))
+            self.menu_recent_projects.addAction(act)
+
+    def _show_delete_path_dialog(self):
+        """Show a dialog for selecting and deleting paths"""
+        if not self.project_manager.has_valid_project():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+            
+        files = self.project_manager.list_paths()
+        if not files:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Paths", "No paths found to delete.")
+            return
+        
+        # Create a custom dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, QScrollArea, QWidget
+        from PySide6.QtCore import Qt
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Delete Paths")
+        dialog.setModal(True)
+        dialog.resize(400, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Header
+        header_label = QLabel("Select paths to delete:")
+        header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(header_label)
+        
+        # Scrollable area for checkboxes
+        scroll_area = QScrollArea()
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        
+        # Create checkboxes for each path
+        checkboxes = {}
+        for fname in files:
+            cb = QCheckBox(fname)
+            # Mark current path with an indicator
+            if fname == self.project_manager.current_path_file:
+                cb.setText(f"✓ {fname} (Current)")
+                cb.setStyleSheet("color: #d32f2f; font-weight: bold;")
+            checkboxes[fname] = cb
+            scroll_layout.addWidget(cb)
+        
+        scroll_widget.setLayout(scroll_layout)
+        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidgetResizable(True)
+        layout.addWidget(scroll_area)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        
+        # Select All/None buttons
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes.values()])
+        
+        select_none_btn = QPushButton("Select None")
+        select_none_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in checkboxes.values()])
+        
+        button_layout.addWidget(select_all_btn)
+        button_layout.addWidget(select_none_btn)
+        button_layout.addStretch()
+        
+        # Delete and Cancel buttons
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
+        delete_btn.clicked.connect(lambda: self._delete_paths_from_dialog(checkboxes, dialog))
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        button_layout.addWidget(delete_btn)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Show dialog
+        dialog.exec()
+
+    # ---------------- Startup and Actions ----------------
+    def _startup_load(self):
+        if self.project_manager.load_last_project() and self.project_manager.has_valid_project():
+            # Load config and apply canvas dims
+            cfg = self.project_manager.load_config()
+            self._apply_robot_dims_from_config(cfg)
+            # Load last or first or create
+            path, filename = self.project_manager.load_last_or_first_or_create()
+            self._set_path_model(path)
+            # Update the current path display after startup
+            self._update_current_path_display()
+        else:
+            # No valid project – show file dialog
+            self._action_open_project(force_dialog=True)
+
+    def _apply_robot_dims_from_config(self, cfg):
+        try:
+            length_m = float(cfg.get("robot_length_meters", 0.60) or 0.60)
+            width_m = float(cfg.get("robot_width_meters", 0.60) or 0.60)
+        except Exception:
+            length_m, width_m = 0.60, 0.60
+        self.canvas.set_robot_dimensions(length_m, width_m)
+
+    def _action_open_project(self, force_dialog: bool = False):
+        directory = None
+        if not force_dialog and self.project_manager.has_valid_project():
+            directory = self.project_manager.project_dir
+        if directory is None:
+            directory = QFileDialog.getExistingDirectory(self, "Open Project Directory")
+            if not directory:
+                # Keep empty path visible
+                self._set_path_model(Path())
+                return
+        self.project_manager.set_project_dir(directory)
+        cfg = self.project_manager.load_config()
+        self._apply_robot_dims_from_config(cfg)
+        path, filename = self.project_manager.load_last_or_first_or_create()
+        self._set_path_model(path)
+        # Update the current path display after opening project
+        self._update_current_path_display()
+
+    def _open_recent_project(self, directory: str):
+        if not directory:
+            return
+        self.project_manager.set_project_dir(directory)
+        cfg = self.project_manager.load_config()
+        self._apply_robot_dims_from_config(cfg)
+        path, filename = self.project_manager.load_last_or_first_or_create()
+        self._set_path_model(path)
+        # Update the current path display after opening recent project
+        self._update_current_path_display()
+
+    def _action_edit_config(self):
+        cfg = self.project_manager.load_config()
+        dlg = ConfigDialog(self, cfg, on_change=self._on_config_live_change)
+        if dlg.exec() == QDialog.Accepted:
+            new_cfg = dlg.get_values()
+            self.project_manager.save_config(new_cfg)
+            # Apply to canvas if robot dims changed
+            self._apply_robot_dims_from_config(self.project_manager.config)
+            # Sidebar will use defaults from project_manager when adding optionals
+
+            # Refresh sidebar for current selection so defaults/UI reflect changes
+            self.sidebar.refresh_current_selection()
+
+    def _on_config_live_change(self, key: str, value: float):
+        # Persist to config immediately
+        self.project_manager.save_config({key: value})
+        if key in ("robot_length_meters", "robot_width_meters"):
+            self._apply_robot_dims_from_config(self.project_manager.config)
+        # For optional defaults, no immediate changes unless fields are being added later.
+        # Still refresh visible sidebar to reflect any fields that might show defaults.
+        self.sidebar.refresh_current_selection()
+
+    def _load_path_file(self, filename: str):
+        p = self.project_manager.load_path(filename)
+        if p is None:
+            return
+        self._set_path_model(p)
+        # Update the current path display after loading a path
+        self._update_current_path_display()
+
+    def _action_save_as(self):
+        if not self.project_manager.get_paths_dir():
+            # Need project first
+            self._action_open_project(force_dialog=True)
+            if not self.project_manager.get_paths_dir():
+                return
+        base_dir = self.project_manager.get_paths_dir()
+        suggested = self.project_manager.current_path_file or "untitled.json"
+        # Use global os for initial join to avoid unbound local
+        file_tuple = QFileDialog.getSaveFileName(self, "Save Path As", os.path.join(base_dir, suggested), "JSON Files (*.json)")
+        filepath = file_tuple[0]
+        if not filepath:
+            return
+        # Normalize to project paths folder
+        try:
+            import os as _os
+            folder, name = _os.path.split(filepath)
+            if _os.path.abspath(folder) != _os.path.abspath(base_dir):
+                # Force save into paths dir
+                name = name or suggested
+                filepath = _os.path.join(base_dir, name)
+        except Exception:
+            pass
+        # Save
+        try:
+            import os as _os
+            filename = _os.path.basename(filepath)
+            self.project_manager.save_path(self.path, filename)
+            # Auto-open the newly saved path
+            self._load_path_file(filename)
+        except Exception:
+            pass
+
+    def _action_create_new_path(self):
+        """Create a new blank path and clear the current model"""
+        # Create a new empty path
+        new_path = Path()
+        self._set_path_model(new_path)
+        
+        # If we have a valid project, save it as a new file
+        if self.project_manager.has_valid_project():
+            # Prompt user for filename
+            from PySide6.QtWidgets import QInputDialog
+            filename, ok = QInputDialog.getText(
+                self, "Create New Path", 
+                "Enter path name:", 
+                text="new_path"
+            )
+            
+            if ok and filename:
+                # Add .json extension if not present
+                if not filename.endswith('.json'):
+                    filename += '.json'
+                
+                # Check if file already exists
+                if os.path.exists(os.path.join(self.project_manager.project_dir, "paths", filename)):
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "File Exists", f"A path named '{filename}' already exists. Please choose a different name.")
+                    return
+                
+                # Save the new path
+                self.project_manager.save_path(new_path, filename)
+                # Refresh the load path menu
+                self._populate_load_path_menu()
+            else:
+                # User cancelled, just show the empty path without saving
+                print("User cancelled path creation")
+        else:
+            # No project open, just show the empty path
+            print("No project open - showing empty path")
+
+    def _action_rename_path(self):
+        """Rename the currently open path file"""
+        if not self.project_manager.has_valid_project():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+            
+        if not self.project_manager.current_path_file:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Path", "No path is currently open to rename.")
+            return
+        
+        # Get current filename without extension
+        current_name = self.project_manager.current_path_file
+        if current_name.endswith('.json'):
+            current_name = current_name[:-5]
+        
+        # Prompt user for new filename
+        from PySide6.QtWidgets import QInputDialog
+        new_filename, ok = QInputDialog.getText(
+            self, "Rename Path", 
+            f"Enter new name for '{current_name}':", 
+            text=current_name
+        )
+        
+        if ok and new_filename:
+            # Add .json extension if not present
+            if not new_filename.endswith('.json'):
+                new_filename += '.json'
+            
+            # Check if new filename already exists
+            if new_filename != self.project_manager.current_path_file:
+                if os.path.exists(os.path.join(self.project_manager.project_dir, "paths", new_filename)):
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "File Exists", f"A path named '{new_filename}' already exists. Please choose a different name.")
+                    return
+                
+                # Rename the file
+                try:
+                    old_path = os.path.join(self.project_manager.project_dir, "paths", self.project_manager.current_path_file)
+                    new_path = os.path.join(self.project_manager.project_dir, "paths", new_filename)
+                    os.rename(old_path, new_path)
+                    
+                    # Update the project manager's current path file
+                    self.project_manager.current_path_file = new_filename
+                    self.project_manager.settings.setValue(self.project_manager.KEY_LAST_PATH_FILE, new_filename)
+                    
+                    # Update the UI
+                    self._update_current_path_display()
+                    self._populate_load_path_menu()
+                    
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.information(self, "Path Renamed", f"Successfully renamed to '{new_filename}'")
+                    
+                except Exception as e:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(self, "Rename Failed", f"Failed to rename path: {str(e)}")
+
+    def _delete_paths_from_dialog(self, checkboxes: dict, dialog: QDialog):
+        """Delete the selected paths from the dialog after confirmation"""
+        # Get selected paths from checkboxes
+        selected_paths = [fname for fname, cb in checkboxes.items() if cb.isChecked()]
+        
+        if not selected_paths:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No Selection", "Please select at least one path to delete.")
+            return
+        
+        # Check if current path is being deleted
+        current_path_deleted = False
+        if self.project_manager.current_path_file in selected_paths:
+            current_path_deleted = True
+        
+        # Show confirmation dialog
+        from PySide6.QtWidgets import QMessageBox
+        if len(selected_paths) == 1:
+            msg = f"Are you sure you want to delete '{selected_paths[0]}'?"
+            if current_path_deleted:
+                msg += "\n\n⚠️  This will close the currently open path."
+        else:
+            msg = f"Are you sure you want to delete {len(selected_paths)} paths?\n\n" + "\n".join(f"• {path}" for path in selected_paths)
+            if current_path_deleted:
+                msg += "\n\n⚠️  This will close the currently open path."
+        
+        reply = QMessageBox.question(
+            self, "Confirm Deletion", msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No  # Default to No for safety
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Delete the selected paths
+            deleted_count = 0
+            
+            for path_name in selected_paths:
+                if self.project_manager.delete_path(path_name):
+                    deleted_count += 1
+            
+            # Show result
+            if deleted_count == 1:
+                QMessageBox.information(self, "Path Deleted", f"Successfully deleted '{selected_paths[0]}'")
+            else:
+                QMessageBox.information(self, "Paths Deleted", f"Successfully deleted {deleted_count} paths")
+            
+            # Close the dialog
+            dialog.accept()
+            
+            # Handle current path deletion
+            if current_path_deleted:
+                self._handle_current_path_deleted()
+            
+            # Refresh the load path menu since we no longer have a delete menu
+            self._populate_load_path_menu()
+
+    def _handle_current_path_deleted(self):
+        """Handle the case where the currently open path was deleted"""
+        # Clear the current path
+        self._set_path_model(Path())
+        self._update_current_path_display()
+        
+        # Check if there are other paths available
+        available_paths = self.project_manager.list_paths()
+        
+        if not available_paths:
+            # No paths left - just inform the user
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, 
+                "No Paths Available", 
+                "The current path was deleted and no other paths are available.\n\n"
+                "You can create a new path or open a different project."
+            )
+            return
+        
+        # Ask user if they want to load another path
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Current Path Deleted",
+            f"The current path was deleted.\n\n"
+            f"There are {len(available_paths)} other paths available.\n\n"
+            "Would you like to load one of them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes  # Default to Yes for convenience
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Show path selection dialog
+            self._show_path_selection_dialog()
+        else:
+            # User chose to continue without a path
+            QMessageBox.information(
+                self,
+                "No Path Loaded",
+                "You can create a new path or load an existing one from the Path menu."
+            )
+
+    def _show_path_selection_dialog(self):
+        """Show a dialog for selecting which path to load"""
+        available_paths = self.project_manager.list_paths()
+        if not available_paths:
+            return
+        
+        # Create a simple selection dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QListWidgetItem
+        from PySide6.QtCore import Qt
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Path to Load")
+        dialog.setModal(True)
+        dialog.resize(350, 250)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Header
+        header_label = QLabel("Select a path to load:")
+        header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(header_label)
+        
+        # List of available paths
+        path_list = QListWidget()
+        for path_name in available_paths:
+            item = QListWidgetItem(path_name)
+            path_list.addItem(item)
+        
+        # Select the first item by default
+        if path_list.count() > 0:
+            path_list.setCurrentRow(0)
+        
+        layout.addWidget(path_list)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        
+        # Load and Cancel buttons
+        load_btn = QPushButton("Load Selected")
+        load_btn.setStyleSheet("background-color: #4caf50; color: white; font-weight: bold;")
+        load_btn.clicked.connect(lambda: self._load_selected_path_from_dialog(path_list, dialog))
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(load_btn)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Show dialog
+        dialog.exec()
+
+    def _load_selected_path_from_dialog(self, path_list, dialog):
+        """Load the selected path from the path selection dialog"""
+        current_item = path_list.currentItem()
+        if not current_item:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No Selection", "Please select a path to load.")
+            return
+        
+        selected_path = current_item.text()
+        
+        # Load the selected path
+        path = self.project_manager.load_path(selected_path)
+        if path is not None:
+            self._set_path_model(path)
+            self._update_current_path_display()
+            dialog.accept()
+        else:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to load path '{selected_path}'.")
+
+    def _set_path_model(self, path: Path):
+        self.path = path
+        self.sidebar.set_path(self.path)
+        self.canvas.set_path(self.path)
+        # Update the current path display
+        self._update_current_path_display()
+        # Save immediately to ensure file exists
+        self._schedule_autosave()
+
+    def _update_current_path_display(self):
+        """Update the current path display in the menu, window title, and status bar"""
+        if hasattr(self, 'action_current_path'):
+            if self.project_manager.has_valid_project() and self.project_manager.current_path_file:
+                # Show the current path filename
+                path_name = self.project_manager.current_path_file
+                if path_name.endswith('.json'):
+                    path_name = path_name[:-5]  # Remove .json extension for display
+                self.action_current_path.setText(f"Current: {path_name}")
+                
+                # Update window title to show current project and path
+                project_name = os.path.basename(self.project_manager.project_dir)
+                self.setWindowTitle(f"FRC Path Planning - {project_name} - {path_name}")
+                
+                # Update status bar
+                if hasattr(self, 'statusBar'):
+                    self.statusBar.showMessage(f"Current Path: {path_name} | Project: {project_name}")
+            else:
+                # No project or no current path
+                self.action_current_path.setText("Current: (No Path)")
+                self.setWindowTitle("FRC Path Planning")
+                
+                # Update status bar
+                if hasattr(self, 'statusBar'):
+                    self.statusBar.showMessage("No path loaded")
+
+    def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
+        # Suppress during window state transitions to avoid re-entrant churn
+        if getattr(self, '_layout_stabilizing', False):
+            return
+        if index < 0 or index >= len(self.path.path_elements):
+            return
+        # Clamp via sidebar metadata to keep UI and model consistent
+        x_m = Sidebar._clamp_from_metadata('x_meters', float(x_m))
+        y_m = Sidebar._clamp_from_metadata('y_meters', float(y_m))
+        elem = self.path.path_elements[index]
+        if isinstance(elem, TranslationTarget):
+            elem.x_meters = x_m
+            elem.y_meters = y_m
+        elif isinstance(elem, RotationTarget):
+            # For rotation targets, keep them constrained on the segment between neighbors
+            proj = self._project_point_between_neighbors(index, x_m, y_m)
+            elem.x_meters, elem.y_meters = proj
+        elif isinstance(elem, Waypoint):
+            elem.translation_target.x_meters = x_m
+            elem.translation_target.y_meters = y_m
+            elem.rotation_target.x_meters = x_m
+            elem.rotation_target.y_meters = y_m
+
+        self.sidebar.update_current_values_only()
+        # defer autosave until drag finished; handled by elementDragFinished
+
+    def _on_canvas_element_rotated(self, index: int, radians: float):
+        # Suppress during window state transitions to avoid re-entrant churn
+        if getattr(self, '_layout_stabilizing', False):
+            return
+        if index < 0 or index >= len(self.path.path_elements):
+            return
+        elem = self.path.path_elements[index]
+        # Clamp using sidebar metadata (degrees domain), then convert back to radians
+        degrees = math.degrees(radians)
+        degrees = Sidebar._clamp_from_metadata('rotation_degrees', float(degrees))
+        clamped_radians = math.radians(degrees)
+        if isinstance(elem, RotationTarget):
+            elem.rotation_radians = clamped_radians
+        elif isinstance(elem, Waypoint):
+            elem.rotation_target.rotation_radians = clamped_radians
+        # Update sidebar fields
+        self.sidebar.update_current_values_only()
+        # Debounced autosave on rotation changes
+        self._schedule_autosave()
+
+    def _reproject_all_rotation_positions(self):
+        if self.path is None:
+            return
+        for idx, e in enumerate(self.path.path_elements):
+            if isinstance(e, RotationTarget):
+                # Project using current model state
+                x_m, y_m = self._project_point_between_neighbors(idx, e.x_meters, e.y_meters)
+                e.x_meters, e.y_meters = x_m, y_m
+
+    def _project_point_between_neighbors(self, index: int, x_m: float, y_m: float) -> Tuple[float, float]:
+        # Find previous and next translation/waypoint elements
+        prev_pos = None
+        for i in range(index - 1, -1, -1):
+            e = self.path.path_elements[i]
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                prev_pos = (e.x_meters, e.y_meters) if isinstance(e, TranslationTarget) else (
+                    e.translation_target.x_meters, e.translation_target.y_meters)
+                break
+        next_pos = None
+        for i in range(index + 1, len(self.path.path_elements)):
+            e = self.path.path_elements[i]
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                next_pos = (e.x_meters, e.y_meters) if isinstance(e, TranslationTarget) else (
+                    e.translation_target.x_meters, e.translation_target.y_meters)
+                break
+        if prev_pos is None or next_pos is None:
+            return x_m, y_m
+        ax, ay = prev_pos
+        bx, by = next_pos
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 0.0:
+            return x_m, y_m
+        t = ((x_m - ax) * dx + (y_m - ay) * dy) / denom
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        # Final clamp to field limits
+        proj_x = Sidebar._clamp_from_metadata('x_meters', proj_x)
+        proj_y = Sidebar._clamp_from_metadata('y_meters', proj_y)
+        return proj_x, proj_y
+
+    def _on_canvas_drag_finished(self, index: int):
+        """Called once per item when the user releases the mouse after dragging."""
+        if getattr(self, '_layout_stabilizing', False):
+            return
+        if index < 0 or index >= len(self.path.path_elements):
+            return
+        # Remember which element was dragged so we can re-select it after any reordering
+        dragged_elem = self.path.path_elements[index]
+
+        # Re-evaluate rotation order now that the drag is complete
+        self.sidebar._check_and_swap_rotation_targets()
+
+        # Attempt to restore selection for the dragged element
+        try:
+            new_index = self.path.path_elements.index(dragged_elem)
+        except ValueError:
+            new_index = -1
+        if new_index >= 0:
+            self.sidebar.select_index(new_index)
+
+    # ---------------- Autosave ----------------
+    def _schedule_autosave(self):
+        # Coalesce frequent updates
+        self._autosave_timer.start()
+
+    def _do_autosave(self):
+        # Ensure project dir exists before saving
+        if not self.project_manager.has_valid_project():
+            return
+        self.project_manager.save_path(self.path)
+```
+
+### ui/sidebar.py
+```
+from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QToolBox
+from PySide6.QtWidgets import QListWidget, QListWidgetItem
+from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
+from PySide6.QtCore import Qt
+from PySide6.QtCore import Signal, QPoint, QSize, QTimer
+from enum import Enum
+from typing import Optional, Tuple
+import math
+from PySide6.QtGui import QIcon
+from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+from typing import Any
+
+class ElementType(Enum):
+    TRANSLATION = 'translation'
+    ROTATION = 'rotation'
+    WAYPOINT = 'waypoint'
+
+class CustomList(QListWidget):  # Changed to QListWidget
+    reordered = Signal()  # Move Signal definition here (class-level)
+
+    def __init__(self):
+        super().__init__()
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropOverwriteMode(False)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QListWidget.InternalMove)  # InternalMove for flat reordering
+        self.setAcceptDrops(True)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        # Do not mutate item data or text here; items already reordered visually.
+        # Emitting reordered lets the owner update the underlying model.
+        self.reordered.emit()
+
+class PopupCombobox(QWidget):
+    item_selected = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.button = QPushButton("Add property")
+        self.button.setIcon(QIcon("assets/add_icon.png"))
+        self.button.setIconSize(QSize(16, 16))
+        self.button.setToolTip("Add an optional property")
+        self.button.setStyleSheet("QPushButton { border: none; padding: 2px 6px; }")
+        self.button.setMinimumHeight(22)
+        self.menu = QMenu(self)
+        self.button.clicked.connect(self.show_menu)
+        layout.addWidget(self.button)
+
+    def show_menu(self):
+        self.menu.popup(self.button.mapToGlobal(QPoint(0, self.button.height())))
+
+    def add_items(self, items):
+        self.menu.clear()
+        for item in items:
+            action = self.menu.addAction(item)
+            action.triggered.connect(lambda checked=False, text=item: self.item_selected.emit(text))
+
+    def setText(self, text: str):
+        self.button.setText(text)
+
+    def setSize(self, size: QSize):
+        self.button.setFixedSize(size)
+        self.button.setIconSize(size)
+
+    def setIcon(self, icon: QIcon):
+        self.button.setIcon(icon)
+
+    def setToolTip(self, text: str):
+        self.button.setToolTip(text)
+
+    def setStyleSheet(self, style: str):
+        self.button.setStyleSheet(style)
+
+    def clear(self):
+        self.menu.clear()
+
+class Sidebar(QWidget):
+    # Emitted when a list item is selected in the sidebar
+    elementSelected = Signal(int)  # index
+    # Emitted when attributes are changed through the UI (positions, rotation, etc.)
+    modelChanged = Signal()
+    # Emitted when structure changes (reorder, type switch)
+    modelStructureChanged = Signal()
+
+    spinner_metadata = {
+        # Put rotation first so it appears at the top of Core
+        'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
+        'x_meters': {'label': 'X (m)', 'step': 0.05, 'range': (0.0, float(FIELD_LENGTH_METERS)), 'removable': False, 'section': 'core'},
+        'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0.0, float(FIELD_WIDTH_METERS)), 'removable': False, 'section': 'core'},
+        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
+        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
+        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'translation_limits'},
+        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': True, 'section': 'translation_limits'},
+        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'rotation_limits'},
+        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'rotation_limits'}
+    }
+
+    # Map UI spinner keys to model attribute names (for rotation fields in degrees)
+    degrees_to_radians_attr_map = {
+        'rotation_degrees': 'rotation_radians',
+        'max_velocity_deg_per_sec': 'max_velocity_rad_per_sec',
+        'max_acceleration_deg_per_sec2': 'max_acceleration_rad_per_sec2',
+    }
+
+    @classmethod
+    def _meta(cls, key: str) -> dict:
+        return cls.spinner_metadata.get(key, {})
+
+    @classmethod
+    def _label(cls, key: str) -> str:
+        meta = cls._meta(key)
+        return meta.get('label', key)
+
+    @classmethod
+    def _clamp_from_metadata(cls, key: str, value: float) -> float:
+        meta = cls._meta(key)
+        value_min, value_max = meta.get('range', (None, None))
+        if value_min is None or value_max is None:
+            return value
+        if value < value_min:
+            return value_min
+        if value > value_max:
+            return value_max
+        return value
+
+    def __init__(self, path=Path()):
+        super().__init__()
+        main_layout = QVBoxLayout(self)
+        self.setMinimumWidth(300)  # Set a minimum width for the sidebar
+
+        # Top section for the list label and add button in horizontal layout
+        top_section = QWidget()
+        top_layout = QHBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+        label = QLabel("Path Elements")
+        top_layout.addWidget(label)
+        top_layout.addStretch()  # Add stretch to push button to the right
+        self.add_element_pop = PopupCombobox()
+        self.add_element_pop.setText("Add element")
+        self.add_element_pop.setToolTip("Add a path element at the current selection")
+        top_layout.addWidget(self.add_element_pop)
+        main_layout.addWidget(top_section)
+
+        self.path = path
+        # Optional: set externally to access config defaults
+        self.project_manager = None
+        # Re-entrancy/visibility guards
+        self._suspended: bool = False
+        self._ready: bool = False
+
+        self.points_list = CustomList()
+        main_layout.addWidget(self.points_list)
+        main_layout.addSpacing(10)  # Add space between list and groupbox
+
+        # Create a container for the title bar to style it
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("titleBar")
+        self.title_bar.setStyleSheet("""
+            QWidget#titleBar {
+                background-color: #404040; /* A more distinct grey */
+                border: 1px solid #666666;
+                border-radius: 5px;
+            }
+        """)
+        title_bar_layout = QHBoxLayout(self.title_bar)
+        title_bar_layout.setContentsMargins(10, 0, 10, 0)  # Remove vertical margins
+        title_bar_layout.setSpacing(0)
+        title_label = QLabel("Element Properties")
+        title_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            background: transparent;
+            border: none;
+            padding: 4px 0;
+        """)
+        title_bar_layout.addWidget(title_label)
+        title_bar_layout.addStretch()
+        self.optional_pop = PopupCombobox()
+        self.optional_pop.setText("Add property")
+        title_bar_layout.addWidget(self.optional_pop)
+        main_layout.addWidget(self.title_bar)
+
+        # Form section for editable properties
+        self.form_container = QGroupBox()
+        self.form_container.setStyleSheet("""
+            QGroupBox {
+                background-color: #404040; /* A more distinct grey */
+                border: 1px solid #666666;
+                border-radius: 5px;
+            }
+        """)
+        # Main layout for the group box
+        group_box_spinner_layout = QVBoxLayout(self.form_container)
+        group_box_spinner_layout.setContentsMargins(6, 6, 6, 6)
+
+        # Collapsible sections using QToolBox
+        self.toolbox = QToolBox()
+        self.toolbox.setObjectName("propertiesToolbox")
+        self.toolbox.setStyleSheet("""
+            QToolBox {
+                background: transparent;
+            }
+            QToolBox::tab {
+                font-weight: 600;
+                padding: 6px 8px;
+                background: #3a3a3a;
+                color: #f0f0f0;
+                border: 0px;
+                border-bottom: 1px solid #ffffff; /* divider under every tab */
+            }
+            QToolBox::tab:selected {
+                background: #4a4a4a;
+                color: #ffffff;
+                border-bottom: 1px solid #ffffff; /* keep divider when expanded */
+            }
+            QToolBox::tab:!selected {
+                background: #3a3a3a;
+                color: #dddddd;
+                border-bottom: 1px solid #ffffff;
+            }
+            /* Ensure a visible white divider between the selected tab and its page */
+            QToolBox > QWidget {
+                background: #404040;
+                border-top: 1px solid #ffffff;
+            }
+            """
+        )
+
+        # Core section (always available): x/y and rotation (if applicable)
+        self.core_page = QWidget()
+        self.core_layout = QFormLayout(self.core_page)
+        self.core_layout.setLabelAlignment(Qt.AlignRight)
+        self.core_layout.setVerticalSpacing(6)
+        self.core_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.toolbox.addItem(self.core_page, "Core")
+
+        # Translation Limits section (optional fields)
+        self.translation_limits_page = QWidget()
+        self.translation_limits_layout = QFormLayout(self.translation_limits_page)
+        self.translation_limits_layout.setLabelAlignment(Qt.AlignRight)
+        self.translation_limits_layout.setVerticalSpacing(6)
+        self.translation_limits_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.toolbox.addItem(self.translation_limits_page, "Translation Limits")
+
+        # Rotation Limits section (optional fields)
+        self.rotation_limits_page = QWidget()
+        self.rotation_limits_layout = QFormLayout(self.rotation_limits_page)
+        self.rotation_limits_layout.setLabelAlignment(Qt.AlignRight)
+        self.rotation_limits_layout.setVerticalSpacing(6)
+        self.rotation_limits_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.toolbox.addItem(self.rotation_limits_page, "Rotation Limits")
+
+        # For remembering last-open section per element
+        self._last_opened_section_by_element = {}
+        self.toolbox.currentChanged.connect(self._remember_current_section)
+
+        # Store label references for each spinner
+        self.spinners = {}
+
+        # Optional elements combobox
+        self.optional_container = QWidget()
+        self.optional_box_layout = QHBoxLayout(self.optional_container)
+        self.optional_box_layout.setContentsMargins(0, 0, 0, 0)  # Removes extra padding
+        self.type_combo = QComboBox()
+        self.type_combo.addItems([e.value for e in ElementType])
+        self.type_label = QLabel("Type:")
+        self.optional_box_layout.addWidget(self.type_combo)
+
+        # Put the type selector and optional property button above the toolbox
+        header_row = QWidget()
+        header_row_layout = QHBoxLayout(header_row)
+        header_row_layout.setContentsMargins(0, 0, 0, 0)
+        header_row_layout.setSpacing(6)
+        header_row_layout.addWidget(self.type_label)
+        header_row_layout.addWidget(self.optional_container, 1)
+        group_box_spinner_layout.addWidget(header_row)
+
+        for name, data in self.spinner_metadata.items():
+            spin = QDoubleSpinBox()
+            spin.setSingleStep(data['step'])
+            spin.setRange(*data['range'])
+            spin.setValue(0)
+            spin.setMinimumWidth(72)  # Wider for readability
+            spin.setMaximumWidth(90)
+            label = QLabel(data['label'])
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            label.setToolTip(data['label'])
+
+            # Add button next to spinner
+            spin_row = QWidget()
+            spin_row_layout = QHBoxLayout(spin_row)
+            spin_row_layout.setContentsMargins(0, 0, 0, 0)
+            spin_row_layout.setSpacing(5)  # Controls space between spin and btn
+            spin_row.setMinimumHeight(24)
+            spin_row.setMaximumHeight(24)
+            btn = QPushButton()
+            btn.setIconSize(QSize(14, 14))
+            btn.setFixedSize(16, 16)
+            btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")
+            if data.get('removable', True):
+                btn.setIcon(QIcon("assets/remove_icon.png"))
+                # Connect button to remove attribute
+                btn.clicked.connect(lambda checked=False, n=name: self.on_attribute_removed(n))
+            else:
+                btn.setIcon(QIcon())  # Blank icon
+                btn.setEnabled(False)  # Make non-removable buttons non-interactive
+
+            spin_row_layout.addStretch()  # Push widgets to the right
+            spin_row_layout.addWidget(spin)
+            spin_row_layout.addWidget(btn)
+
+            # FIX: capture 'name' as a default argument in the lambda
+            spin.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
+
+            # Add to the appropriate section based on metadata
+            section = data.get('section', 'core')
+            if section == 'core':
+                self.core_layout.addRow(label, spin_row)
+            elif section == 'translation_limits':
+                self.translation_limits_layout.addRow(label, spin_row)
+            elif section == 'rotation_limits':
+                self.rotation_limits_layout.addRow(label, spin_row)
+            else:
+                self.core_layout.addRow(label, spin_row)
+
+            self.spinners[name] = (spin, label, btn, spin_row)
+
+        group_box_spinner_layout.addWidget(self.toolbox)
+
+        # Subtle padding around the form
+        self.form_container.setContentsMargins(6, 6, 6, 6)
+        main_layout.addWidget(self.form_container)
+        main_layout.addStretch()  # Pushes all content to the top
+
+        # Defer selection handling to the next event loop to avoid re-entrancy
+        try:
+            self.points_list.itemSelectionChanged.connect(lambda: QTimer.singleShot(0, self.on_item_selected))
+        except Exception:
+            pass
+        self.points_list.reordered.connect(self.on_points_list_reordered)
+        # Additional guard: prevent dragging rotation to start or end by enforcing after drop
+        self.type_combo.currentTextChanged.connect(lambda v: QTimer.singleShot(0, lambda: self.on_type_change(v)))
+        self.optional_pop.item_selected.connect(lambda text: QTimer.singleShot(0, lambda: self.on_attribute_added(text)))
+
+        # Add element dropdown wiring
+        self.add_element_pop.item_selected.connect(lambda text: QTimer.singleShot(0, lambda: self.on_add_element_selected(text)))
+
+        self.rebuild_points_list()
+
+    def hide_spinners(self):
+        for name, (spin, label, btn, spin_row) in self.spinners.items():
+            label.setVisible(False)
+            spin_row.setVisible(False)
+        self.type_combo.setVisible(False)
+        self.type_label.setVisible(False)
+        self.form_container.setVisible(False)
+        self.title_bar.setVisible(False)
+
+    def set_suspended(self, suspended: bool):
+        self._suspended = bool(suspended)
+
+    def mark_ready(self):
+        self._ready = True
+
+    def get_selected_index(self):
+        # Prefer current row which mirrors list order to model
+        row = self.points_list.currentRow()
+        if row is None or row < 0:
+            return None
+        if self.path is None:
+            return None
+        if row >= len(self.path.path_elements):
+            return None
+        return row
+
+    def expose_element(self, element):
+        if element is None:
+            return
+        # Reset optional dropdown
+        self.optional_pop.clear()
+        self.optional_display_to_key = {}
+        optional_display_items = []
+
+        # Helper: show or queue a direct attribute
+        def show_attr(attr_owner, name, convert_deg=False):
+            if name not in self.spinners:
+                return False
+            spin, label, btn, spin_row = self.spinners[name]
+            if hasattr(attr_owner, name):
+                value = getattr(attr_owner, name)
+                if value is not None:
+                    shown = math.degrees(value) if convert_deg else value
+                    spin.setValue(shown)
+                    label.setVisible(True)
+                    spin_row.setVisible(True)
+                    return True
+            else:
+                display = Sidebar._label(name)
+                optional_display_items.append(display)
+                self.optional_display_to_key[display] = name
+                return False
+
+        # Helper: show a degrees-based attribute mapped from radians on model
+        def show_deg_attr(owner, deg_name):
+            if deg_name not in self.spinners:
+                return False
+            model_attr = Sidebar.degrees_to_radians_attr_map.get(deg_name)
+            if not model_attr:
+                return False
+            spin, label, btn, spin_row = self.spinners[deg_name]
+            if hasattr(owner, model_attr):
+                value = getattr(owner, model_attr)
+                if value is not None:
+                    spin.setValue(math.degrees(value))
+                    label.setVisible(True)
+                    spin_row.setVisible(True)
+                    return True
+            else:
+                # Only force-show default for rotation_degrees; for limits queue as optional
+                if deg_name == 'rotation_degrees':
+                    spin.setValue(0.0)
+                    label.setVisible(True)
+                    spin_row.setVisible(True)
+                    return True
+                else:
+                    display = Sidebar._label(deg_name)
+                    optional_display_items.append(display)
+                    self.optional_display_to_key[display] = deg_name
+                    return False
+
+        # Decide which owners contribute which fields
+        has_translation_limits = False
+        has_rotation_limits = False
+
+        # First hide all rows; we'll only show those that are present/selected
+        for name, (spin, label, btn, spin_row) in self.spinners.items():
+            label.setVisible(False)
+            spin_row.setVisible(False)
+
+        # Core: position always from translation_target if Waypoint, else from element
+        if isinstance(element, Waypoint):
+            # Position from translation_target
+            show_attr(element.translation_target, 'x_meters')
+            show_attr(element.translation_target, 'y_meters')
+            # Rotation degrees from rotation_target
+            show_deg_attr(element.rotation_target, 'rotation_degrees')
+            # Limits
+            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
+                if show_attr(element.translation_target, name):
+                    has_translation_limits = True
+            for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+                if show_deg_attr(element.rotation_target, name):
+                    has_rotation_limits = True
+        elif isinstance(element, TranslationTarget):
+            show_attr(element, 'x_meters')
+            show_attr(element, 'y_meters')
+            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
+                if show_attr(element, name):
+                    has_translation_limits = True
+                else:
+                    display = Sidebar._label(name)
+                    optional_display_items.append(display)
+                    self.optional_display_to_key[display] = name
+        elif isinstance(element, RotationTarget):
+            show_attr(element, 'x_meters')
+            show_attr(element, 'y_meters')
+            show_deg_attr(element, 'rotation_degrees')
+            for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+                if show_deg_attr(element, name):
+                    has_rotation_limits = True
+
+        # Populate the optional dropdown sorted
+        if optional_display_items:
+            optional_display_items = sorted(list(dict.fromkeys(optional_display_items)))
+            self.optional_pop.add_items(optional_display_items)
+        else:
+            self.optional_pop.clear()
+
+        # Rebuild tabs to reflect which sections actually have content
+        QTimer.singleShot(0, lambda h_t=has_translation_limits, h_r=has_rotation_limits, e=element: (
+            self._rebuild_toolbox_pages(h_t, h_r),
+            self._restore_last_opened_section(e)
+        ))
+
+        # Rotation already first in Core via metadata order; no row surgery required
+        # Ensure visible spin boxes reflect current config bounds if modified
+        self._refresh_spinner_metadata_bounds()
+
+    def update_current_values_only(self):
+        idx = self.get_selected_index()
+        if idx is None or self.path is None:
+            return
+        element = self.path.get_element(idx)
+
+        # Helper to set a spin value safely
+        def set_spin_value(name: str, value: float):
+            if name not in self.spinners:
+                return
+            spin, _, _, _ = self.spinners[name]
+            if not spin.isVisible():
+                return
+            try:
+                spin.blockSignals(True)
+                spin.setValue(value)
+            finally:
+                spin.blockSignals(False)
+
+        # Update position
+        if isinstance(element, Waypoint):
+            set_spin_value('x_meters', element.translation_target.x_meters)
+            set_spin_value('y_meters', element.translation_target.y_meters)
+            # rotation degrees
+            if element.rotation_target.rotation_radians is not None:
+                set_spin_value('rotation_degrees', math.degrees(element.rotation_target.rotation_radians))
+        elif isinstance(element, TranslationTarget):
+            set_spin_value('x_meters', element.x_meters)
+            set_spin_value('y_meters', element.y_meters)
+        elif isinstance(element, RotationTarget):
+            set_spin_value('x_meters', element.x_meters)
+            set_spin_value('y_meters', element.y_meters)
+            if element.rotation_radians is not None:
+                set_spin_value('rotation_degrees', math.degrees(element.rotation_radians))
+
+    def _refresh_spinner_metadata_bounds(self):
+        # If needed in the future: dynamically adjust ranges from config. For now, keep static.
+        # Hook to refresh UI on config change.
+        for name, (spin, label, btn, spin_row) in self.spinners.items():
+            meta = self.spinner_metadata.get(name, {})
+            rng = meta.get('range')
+            if rng and isinstance(rng, tuple) and len(rng) == 2:
+                try:
+                    spin.blockSignals(True)
+                    spin.setRange(float(rng[0]), float(rng[1]))
+                finally:
+                    spin.blockSignals(False)
+
+    def _refresh_toolbox_sections(self, element):
+        # Determine if translation/rotation limits have any visible rows
+        def layout_has_visible_rows(layout: QFormLayout) -> bool:
+            for i in range(layout.rowCount()):
+                field_item = layout.itemAt(i, QFormLayout.FieldRole)
+                if field_item:
+                    w = field_item.widget()
+                    if w and w.isVisible():
+                        return True
+            return False
+        show_translation = layout_has_visible_rows(self.translation_limits_layout)
+        show_rotation = layout_has_visible_rows(self.rotation_limits_layout)
+        self._set_toolbox_enabled(show_translation, show_rotation)
+
+    def _rebuild_toolbox_pages(self, show_translation: bool, show_rotation: bool):
+        # Rebuild toolbox items to exactly match what should be visible
+        self.toolbox.blockSignals(True)
+        try:
+            current_text = self.toolbox.itemText(self.toolbox.currentIndex()) if self.toolbox.count() > 0 else None
+            while self.toolbox.count() > 0:
+                self.toolbox.removeItem(0)
+            self.toolbox.addItem(self.core_page, "Core")
+            if show_translation:
+                self.toolbox.addItem(self.translation_limits_page, "Translation Limits")
+            if show_rotation:
+                self.toolbox.addItem(self.rotation_limits_page, "Rotation Limits")
+            # Restore previous tab if possible
+            if current_text is not None:
+                for i in range(self.toolbox.count()):
+                    if self.toolbox.itemText(i) == current_text:
+                        self.toolbox.setCurrentIndex(i)
+                        break
+            # Ensure a valid tab is selected
+            if self.toolbox.currentIndex() < 0 and self.toolbox.count() > 0:
+                self.toolbox.setCurrentIndex(0)
+        finally:
+            self.toolbox.blockSignals(False)
+
+    def _set_toolbox_enabled(self, show_translation: bool, show_rotation: bool):
+        # Show/hide pages without removing them to avoid deleting widgets
+        self.toolbox.blockSignals(True)
+        try:
+            self.core_page.setVisible(True)
+            self.translation_limits_page.setVisible(bool(show_translation))
+            self.rotation_limits_page.setVisible(bool(show_rotation))
+            # If current page hidden, jump to Core
+            cur = self.toolbox.currentIndex()
+            current_widget = self.toolbox.widget(cur) if cur >= 0 else None
+            if current_widget is not None and not current_widget.isVisible():
+                self.toolbox.setCurrentIndex(0)
+        finally:
+            self.toolbox.blockSignals(False)
+
+    def _remember_current_section(self, index: int):
+        # Remember by tab text for current element
+        element_index = self.get_selected_index()
+        if element_index is None or self.path is None:
+            return
+        if index < 0 or index >= self.toolbox.count():
+            return
+        key = self.toolbox.itemText(index)
+        try:
+            element = self.path.get_element(element_index)
+            self._last_opened_section_by_element[id(element)] = key
+        except Exception:
+            pass
+
+    def _restore_last_opened_section(self, element):
+        desired = self._last_opened_section_by_element.get(id(element))
+        if desired is None:
+            self.toolbox.setCurrentIndex(0)
+            return
+        for i in range(self.toolbox.count()):
+            if self.toolbox.itemText(i) == desired:
+                self.toolbox.setCurrentIndex(i)
+                return
+        # Fallback
+        self.toolbox.setCurrentIndex(0)
+
+    def on_item_selected(self):
+        try:
+            # Guard against re-entrancy and layout instability
+            if getattr(self, '_suspended', False) or not getattr(self, '_ready', False):
+                return
+            idx = self.get_selected_index()
+            if idx is None or self.path is None:
+                self.hide_spinners()
+                return
+            # Validate index bounds
+            if idx < 0 or idx >= len(self.path.path_elements):
+                self.hide_spinners()
+                return
+            # Safely get element
+            try:
+                element = self.path.get_element(idx)
+            except (IndexError, RuntimeError):
+                self.hide_spinners()
+                return
+            # Clear and hide existing UI
+            self.optional_pop.clear()
+            self.hide_spinners()
+            # Expose element properties (guarded)
+            try:
+                self.expose_element(element)
+            except (RuntimeError, AttributeError):
+                return
+            # Determine element type safely
+            try:
+                if isinstance(element, TranslationTarget):
+                    current_type = ElementType.TRANSLATION
+                elif isinstance(element, RotationTarget):
+                    current_type = ElementType.ROTATION
+                else:
+                    current_type = ElementType.WAYPOINT
+            except RuntimeError:
+                return
+            # Rebuild type combo (guarded)
+            try:
+                self._rebuild_type_combo_for_index(idx, current_type)
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            # Refresh add-element options (guarded)
+            try:
+                self._refresh_add_dropdown_items()
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            # Show controls (guarded)
+            try:
+                for widget in (self.type_label, self.type_combo, self.form_container, self.title_bar):
+                    if widget is not None:
+                        widget.setVisible(True)
+            except (RuntimeError, AttributeError):
+                pass  # Non-critical, continue
+            # Note: elementSelected signal intentionally not emitted here to avoid
+            # re-entrant selection loops during fullscreen/resize transitions
+        except Exception as e:
+            # Fail safe: keep UI alive
+            print(f"Sidebar selection error: {e}")
+            self.hide_spinners()
+
+    def on_attribute_removed(self, key):
+        idx = self.get_selected_index()
+        if idx is None or self.path is None:
+            return
+        element = self.path.get_element(idx)
+        # Map degree-based keys to model attributes as needed
+        if key in Sidebar.degrees_to_radians_attr_map:
+            mapped = Sidebar.degrees_to_radians_attr_map[key]
+            if isinstance(element, Waypoint):
+                if hasattr(element.rotation_target, mapped):
+                    setattr(element.rotation_target, mapped, None)
+            elif hasattr(element, mapped):
+                setattr(element, mapped, None)
+        else:
+            if isinstance(element, Waypoint):
+                if hasattr(element.translation_target, key):
+                    setattr(element.translation_target, key, None)
+                if hasattr(element.rotation_target, key):
+                    setattr(element.rotation_target, key, None)
+            elif hasattr(element, key):
+                setattr(element, key, None)
+        self.on_item_selected()
+        self.modelChanged.emit()
+
+    def on_attribute_added(self, key):
+        idx = self.get_selected_index()
+        if idx is None or self.path is None:
+            return
+        element = self.path.get_element(idx)
+        # Translate display name back to actual key if needed
+        if hasattr(self, 'optional_display_to_key') and self.optional_display_to_key:
+            real_key = self.optional_display_to_key.get(key, key)
+        else:
+            real_key = key
+        # Determine default value from config if available
+        cfg_default = None
+        try:
+            if getattr(self, 'project_manager', None) is not None:
+                cfg_default = self.project_manager.get_default_optional_value(real_key)
+        except Exception:
+            cfg_default = None
+        if real_key in Sidebar.degrees_to_radians_attr_map:
+            mapped = Sidebar.degrees_to_radians_attr_map[real_key]
+            # Default from config is in degrees; convert to radians
+            if cfg_default is None:
+                deg_val = 0.0
+            else:
+                deg_val = float(cfg_default)
+            rad_val = math.radians(deg_val)
+            if isinstance(element, Waypoint):
+                if hasattr(element.rotation_target, mapped):
+                    setattr(element.rotation_target, mapped, rad_val)
+            elif hasattr(element, mapped):
+                setattr(element, mapped, rad_val)
+        else:
+            # Distance/velocity defaults use meters or m/s units
+            if cfg_default is None:
+                base_val = 0.0
+            else:
+                base_val = float(cfg_default)
+            if isinstance(element, Waypoint):
+                if hasattr(element.translation_target, real_key):
+                    setattr(element.translation_target, real_key, base_val)
+                if hasattr(element.rotation_target, real_key):
+                    setattr(element.rotation_target, real_key, base_val)
+            elif hasattr(element, real_key):
+                setattr(element, real_key, base_val)
+        # Defer UI refresh to allow QMenu to close cleanly, then rebuild dropdown
+        QTimer.singleShot(0, lambda e=element: self.expose_element(e))
+        self.modelChanged.emit()
+
+    def on_type_change(self, value):
+        idx = self.get_selected_index()
+        if idx is not None and self.path is not None:
+            prev = self.path.get_element(idx)
+            # Only change if type is different
+            prev_type = (
+                ElementType.TRANSLATION if isinstance(prev, TranslationTarget)
+                else ElementType.ROTATION if isinstance(prev, RotationTarget)
+                else ElementType.WAYPOINT if isinstance(prev, Waypoint)
+                else None
+            )
+            new_type = ElementType(value)
+            # Prevent creating rotation at ends unless the current element already is rotation
+            if new_type == ElementType.ROTATION and prev_type != ElementType.ROTATION:
+                if idx == 0 or idx == len(self.path.path_elements) - 1:
+                    # Disallowed; restore UI selection
+                    self._rebuild_type_combo_for_index(idx, prev_type)
+                    return
+            if prev_type == new_type:
+                return
+            # Gather all attributes from TranslationTarget and RotationTarget
+            translation_attrs = [
+                'x_meters',
+                'y_meters',
+                'final_velocity_meters_per_sec',
+                'max_velocity_meters_per_sec',
+                'max_acceleration_meters_per_sec2',
+                'intermediate_handoff_radius_meters'
+            ]
+            rotation_attrs = [
+                'rotation_radians',
+                'x_meters',
+                'y_meters',
+                'max_velocity_rad_per_sec',
+                'max_acceleration_rad_per_sec2'
+            ]
+            translation_values = {attr: getattr(prev, attr, None) for attr in translation_attrs}
+            rotation_values = {attr: getattr(prev, attr, None) for attr in rotation_attrs}
+            if prev_type == ElementType.WAYPOINT:
+                new_elem = (
+                    prev.translation_target if new_type == ElementType.TRANSLATION
+                    else prev.rotation_target
+                )
+            elif new_type == ElementType.ROTATION:
+                new_elem = RotationTarget(
+                    rotation_values['rotation_radians'] if rotation_values['rotation_radians'] else 0,
+                    rotation_values['x_meters'] if rotation_values['x_meters'] else 0.0,
+                    rotation_values['y_meters'] if rotation_values['y_meters'] else 0.0,
+                    rotation_values['max_velocity_rad_per_sec'],
+                    rotation_values['max_acceleration_rad_per_sec2'],
+                )
+            elif new_type == ElementType.TRANSLATION:
+                new_elem = TranslationTarget(
+                    translation_values['x_meters'] if translation_values['x_meters'] else 0.0,
+                    translation_values['y_meters'] if translation_values['y_meters'] else 0.0,
+                    translation_values['final_velocity_meters_per_sec'],
+                    translation_values['max_velocity_meters_per_sec'],
+                    translation_values['max_acceleration_meters_per_sec2'],
+                    translation_values['intermediate_handoff_radius_meters']
+                )
+            elif new_type == ElementType.WAYPOINT:
+                if prev_type == ElementType.TRANSLATION:
+                    new_elem = Waypoint(translation_target=prev)
+                    new_elem.rotation_target.x_meters = new_elem.translation_target.x_meters
+                    new_elem.rotation_target.y_meters = new_elem.translation_target.y_meters
+                else:
+                    new_elem = Waypoint(rotation_target=prev)
+                    new_elem.translation_target.x_meters = new_elem.rotation_target.x_meters
+                    new_elem.translation_target.y_meters = new_elem.rotation_target.y_meters
+            # If we have just created or switched to a rotation element, snap its x/y to closest point on line between neighbors
+            if new_type == ElementType.ROTATION:
+                # Update the model first so _project_point_between_neighbors can find the correct neighbors
+                self.path.path_elements[idx] = new_elem
+                # Project the current position onto the line between neighbors
+                proj_x, proj_y = self._project_point_between_neighbors(idx, new_elem.x_meters, new_elem.y_meters)
+                new_elem.x_meters = proj_x
+                new_elem.y_meters = proj_y
+                # Update the model again with the corrected coordinates
+                self.path.path_elements[idx] = new_elem
+                # Check if we need to swap rotation targets to maintain visual order
+                self._check_and_swap_rotation_targets()
+            else:
+                # For non-rotation elements, just update the model
+                self.path.path_elements[idx] = new_elem
+            self.rebuild_points_list()
+            self.select_index(idx)
+            self.modelStructureChanged.emit()
+
+    def _rebuild_type_combo_for_index(self, idx: int, current_type: ElementType):
+        if self.path is None:
+            return
+        is_end = (idx == 0 or idx == len(self.path.path_elements) - 1)
+        allowed = [e.value for e in ElementType]
+        if is_end and current_type != ElementType.ROTATION:
+            allowed = [ElementType.TRANSLATION.value, ElementType.WAYPOINT.value]
+        try:
+            self.type_combo.blockSignals(True)
+            self.type_combo.clear()
+            self.type_combo.addItems(allowed)
+            self.type_combo.setCurrentText(current_type.value)
+        finally:
+            self.type_combo.blockSignals(False)
+
+    def _neighbor_positions_model(self, idx: int) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        if self.path is None:
+            return None, None
+        # prev
+        prev_pos = None
+        for i in range(idx - 1, -1, -1):
+            e = self.path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                prev_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                prev_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        # next
+        next_pos = None
+        for i in range(idx + 1, len(self.path.path_elements)):
+            e = self.path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                next_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                next_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        return prev_pos, next_pos
+
+    def _project_point_between_neighbors(self, idx: int, x_m: float, y_m: float) -> Tuple[float, float]:
+        prev_pos, next_pos = self._neighbor_positions_model(idx)
+        if prev_pos is None or next_pos is None:
+            return x_m, y_m
+        ax, ay = prev_pos
+        bx, by = next_pos
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 0.0:
+            return x_m, y_m
+        t = ((x_m - ax) * dx + (y_m - ay) * dy) / denom
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        proj_x = Sidebar._clamp_from_metadata('x_meters', proj_x)
+        proj_y = Sidebar._clamp_from_metadata('y_meters', proj_y)
+        return proj_x, proj_y
+
+    def _midpoint_between_neighbors(self, idx: int) -> Optional[Tuple[float, float]]:
+        prev_pos, next_pos = self._neighbor_positions_model(idx)
+        if prev_pos is None or next_pos is None:
+            return None
+        ax, ay = prev_pos
+        bx, by = next_pos
+        return (ax + bx) / 2.0, (ay + by) / 2.0
+
+    def _reproject_all_rotation_positions(self):
+        if self.path is None:
+            return
+        for idx, e in enumerate(self.path.path_elements):
+            if isinstance(e, RotationTarget):
+                proj_x, proj_y = self._project_point_between_neighbors(idx, e.x_meters, e.y_meters)
+                e.x_meters = proj_x
+                e.y_meters = proj_y
+
+    def on_attribute_change(self, key, value):
+        idx = self.get_selected_index()
+        if idx is not None and self.path is not None:
+            element = self.path.get_element(idx)
+            if key in Sidebar.degrees_to_radians_attr_map:
+                mapped = Sidebar.degrees_to_radians_attr_map[key]
+                # Clamp using degrees-domain metadata before converting
+                clamped_deg = Sidebar._clamp_from_metadata(key, float(value))
+                rad_value = math.radians(clamped_deg)
+                if isinstance(element, Waypoint):
+                    if hasattr(element.rotation_target, mapped):
+                        setattr(element.rotation_target, mapped, rad_value)
+                elif hasattr(element, mapped):
+                    setattr(element, mapped, rad_value)
+            else:
+                if isinstance(element, Waypoint):
+                    if hasattr(element.translation_target, key):
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element.translation_target, key, clamped)
+                        # Reproject all rotation targets since endpoints changed
+                        self._reproject_all_rotation_positions()
+                    if hasattr(element.rotation_target, key):
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element.rotation_target, key, clamped)
+                elif hasattr(element, key):
+                    if isinstance(element, RotationTarget) and key in ('x_meters', 'y_meters'):
+                        # Project rotation element onto segment between neighbors; adjust both x and y
+                        desired_x = float(value) if key == 'x_meters' else float(element.x_meters)
+                        desired_y = float(value) if key == 'y_meters' else float(element.y_meters)
+                        desired_x = Sidebar._clamp_from_metadata('x_meters', desired_x)
+                        desired_y = Sidebar._clamp_from_metadata('y_meters', desired_y)
+                        proj_x, proj_y = self._project_point_between_neighbors(idx, desired_x, desired_y)
+                        element.x_meters = proj_x
+                        element.y_meters = proj_y
+                        # Keep the UI in sync immediately
+                        self.update_current_values_only()
+                    else:
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element, key, clamped)
+            # If a translation target moved, reproject rotations
+            if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
+                self._reproject_all_rotation_positions()
+            self.modelChanged.emit()
+
+    def rebuild_points_list(self):
+        self.hide_spinners()
+        # Remove and delete any existing row widgets to prevent visual artifacts
+        try:
+            self.points_list.blockSignals(True)
+            for i in range(self.points_list.count()):
+                item = self.points_list.item(i)
+                w = self.points_list.itemWidget(item)
+                if w is not None:
+                    self.points_list.removeItemWidget(item)
+                    w.deleteLater()
+            self.points_list.clear()
+            # Rebuild add-element dropdown items based on selection context
+            self._refresh_add_dropdown_items()
+            if self.path:
+                for i, p in enumerate(self.path.path_elements):
+                    if isinstance(p, TranslationTarget):
+                        name = ElementType.TRANSLATION.value
+                    elif isinstance(p, RotationTarget):
+                        name = ElementType.ROTATION.value
+                    elif isinstance(p, Waypoint):
+                        name = ElementType.WAYPOINT.value
+                    else:
+                        name = "Unknown"
+                    # Use an empty QListWidgetItem and render all visuals via a row widget to avoid duplicate text painting
+                    item = QListWidgetItem("")
+                    item.setData(Qt.UserRole, i)
+                    # Build row widget with label and remove button
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setContentsMargins(6, 0, 6, 0)
+                    row_layout.setSpacing(6)
+                    label = QLabel(name)
+                    label.setStyleSheet("color: #f0f0f0;")
+                    row_layout.addWidget(label)
+                    row_layout.addStretch()
+                    remove_btn = QPushButton()
+                    remove_btn.setIcon(QIcon("assets/remove_icon.png"))
+                    remove_btn.setToolTip("Remove element")
+                    remove_btn.setFixedSize(18, 18)
+                    remove_btn.setIconSize(QSize(14, 14))
+                    remove_btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")
+                    # Capture current index by default-arg
+                    remove_btn.clicked.connect(lambda checked=False, idx_to_remove=i: self._on_remove_element(idx_to_remove))
+                    row_layout.addWidget(remove_btn)
+                    # Ensure the row height matches the widget
+                    item.setSizeHint(row_widget.sizeHint())
+                    self.points_list.addItem(item)
+                    self.points_list.setItemWidget(item, row_widget)
+        finally:
+            self.points_list.blockSignals(False)
+
+    def set_path(self, path: Path):
+        self.path = path
+        # Pre-check: ensure rotation elements are projected between neighbors
+        self._reproject_all_rotation_positions()
+        self.rebuild_points_list()
+        # No signal here; caller coordinates initial sync
+
+    def on_points_list_reordered(self):
+        if self.path is None:
+            return
+        # New order by original indices from UI items
+        new_order = []
+        for i in range(self.points_list.count()):
+            item = self.points_list.item(i)
+            idx = item.data(Qt.UserRole)
+            if isinstance(idx, int):
+                new_order.append(idx)
+        # Apply order to model
+        self.path.reorder_elements(new_order)
+        # Repair any invalid placements
+        self._repair_rotation_at_ends()
+        # Ensure rotations are projected post-reorder
+        self._reproject_all_rotation_positions()
+        # Rebuild UI to reflect corrected model order
+        self.rebuild_points_list()
+        self.modelStructureChanged.emit()
+
+    # External API for other widgets
+    def select_index(self, index: int):
+        if index is None:
+            return
+        if index < 0 or index >= self.points_list.count():
+            return
+        # Defer selection to avoid re-entrancy during fullscreen/layout changes
+        QTimer.singleShot(0, lambda i=index: self.points_list.setCurrentRow(i))
+
+    def refresh_current_selection(self):
+        # Re-run expose for current selection using current model values
+        self.on_item_selected()
+
+    # -------------------- Add/Remove elements --------------------
+    def _refresh_add_dropdown_items(self):
+        # Allow adding rotation only if there are at least two translation or waypoint elements
+        if self.path is None:
+            self.add_element_pop.clear()
+            return
+        non_rot = sum(1 for e in self.path.path_elements if not isinstance(e, RotationTarget))
+        items = [ElementType.TRANSLATION.value, ElementType.WAYPOINT.value]
+        if non_rot >= 2:
+            items.append(ElementType.ROTATION.value)
+        self.add_element_pop.add_items(items)
+
+    def _insert_position_from_selection(self) -> int:
+        # Insert AFTER the selected row; if nothing selected, append at end
+        current_row = self.points_list.currentRow()
+        if current_row < 0:
+            return len(self.path.path_elements) if self.path else 0
+        return current_row + 1
+
+    def on_add_element_selected(self, type_text: str):
+        if self.path is None:
+            return
+        new_type = ElementType(type_text)
+        insert_pos = self._insert_position_from_selection()
+        # Enforce rotation cannot be at start/end
+        if new_type == ElementType.ROTATION:
+            if insert_pos == 0:
+                insert_pos = 1
+            if insert_pos == len(self.path.path_elements):
+                insert_pos = max(0, len(self.path.path_elements) - 1)
+            if len(self.path.path_elements) == 0:
+                # Cannot add rotation as the first element; switch to translation
+                new_type = ElementType.TRANSLATION
+        # Build the new element with sensible defaults
+        def current_pos_defaults() -> Tuple[float, float]:
+            idx = self.get_selected_index()
+            if idx is None or idx < 0 or idx >= len(self.path.path_elements):
+                # Default to center field
+                return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+            e = self.path.path_elements[idx]
+            if isinstance(e, TranslationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            if isinstance(e, Waypoint):
+                return float(e.translation_target.x_meters), float(e.translation_target.y_meters)
+            if isinstance(e, RotationTarget):
+                return float(e.x_meters), float(e.y_meters)
+            return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+        x0, y0 = current_pos_defaults()
+        if new_type == ElementType.TRANSLATION:
+            new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
+        elif new_type == ElementType.WAYPOINT:
+            tt = TranslationTarget(x_meters=x0, y_meters=y0)
+            rt = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+            new_elem = Waypoint(translation_target=tt, rotation_target=rt)
+        else:  # ROTATION
+            new_elem = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+        # Insert and then fix constraints/positions
+        self.path.path_elements.insert(insert_pos, new_elem)
+        # If we inserted a rotation, snap it to midpoint between neighbors
+        if isinstance(new_elem, RotationTarget):
+            mid = self._midpoint_between_neighbors(insert_pos)
+            if mid is not None:
+                mx, my = mid
+                new_elem.x_meters = mx
+                new_elem.y_meters = my
+        # After any insert, ensure rotations are not at ends; if they are, swap inward with nearest non-rotation
+        self._repair_rotation_at_ends()
+        # Reproject rotation positions
+        self._reproject_all_rotation_positions()
+        # Rebuild UI and select newly inserted element (find its new index by identity)
+        identity = id(new_elem)
+        self.rebuild_points_list()
+        new_index = next((i for i, e in enumerate(self.path.path_elements) if id(e) == identity), insert_pos)
+        self.select_index(new_index)
+        self.modelStructureChanged.emit()
+
+    def _on_remove_element(self, idx_to_remove: int):
+        if self.path is None:
+            return
+        if idx_to_remove < 0 or idx_to_remove >= len(self.path.path_elements):
+            return
+        removed = self.path.path_elements.pop(idx_to_remove)
+        # After removal, ensure we do not end with rotation at start or end
+        self._repair_rotation_at_ends()
+        # Reproject post-change
+        self._reproject_all_rotation_positions()
+        # Rebuild list and update selection sensibly
+        self.rebuild_points_list()
+        # Select previous index or last available
+        if self.path.path_elements:
+            new_sel = min(idx_to_remove, len(self.path.path_elements) - 1)
+            self.select_index(new_sel)
+        self.modelStructureChanged.emit()
+
+    def _repair_rotation_at_ends(self):
+        if self.path is None or not self.path.path_elements:
+            return
+        elems = self.path.path_elements
+        # Repair start
+        if isinstance(elems[0], RotationTarget):
+            non_rots = sum(1 for e in elems if not isinstance(e, RotationTarget))
+            if non_rots > 1:
+                # Swap with the first non_rot
+                swap_idx = next((i for i, e in enumerate(elems) if not isinstance(e, RotationTarget)), None)
+                if swap_idx is not None:
+                    elems[0], elems[swap_idx] = elems[swap_idx], elems[0]
+            else:
+                # Convert start to TranslationTarget
+                old = elems[0]
+                elems[0] = TranslationTarget(
+                    x_meters=old.x_meters,
+                    y_meters=old.y_meters
+                )
+        # Repair end
+        if elems and isinstance(elems[-1], RotationTarget):
+            non_rots = sum(1 for e in elems if not isinstance(e, RotationTarget))
+            if non_rots > 1:
+                # Swap with the last non_rot
+                swap_idx = next((len(elems) - 1 - i for i, e in enumerate(reversed(elems)) if not isinstance(e, RotationTarget)), None)
+                if swap_idx is not None:
+                    elems[-1], elems[swap_idx] = elems[swap_idx], elems[-1]
+            else:
+                # Convert end to TranslationTarget
+                old = elems[-1]
+                elems[-1] = TranslationTarget(
+                    x_meters=old.x_meters,
+                    y_meters=old.y_meters
+                )
+
+    def _check_and_swap_rotation_targets(self):
+        """Ensure rotation targets between two anchor elements (translation/waypoint) are ordered
+        in the model according to their geometric order along the line segment connecting
+        those anchors. Ordering is determined by the parametric value *t* (0-1) obtained by
+        projecting each rotation target onto the anchor-to-anchor line.
+        """
+        if self.path is None or len(self.path.path_elements) < 3:
+            return
+        elems = self.path.path_elements
+        # Helper to get an element's position (model coordinates)
+        def _pos(el):
+            if isinstance(el, TranslationTarget):
+                return float(el.x_meters), float(el.y_meters)
+            if isinstance(el, Waypoint):
+                tt = el.translation_target
+                return float(tt.x_meters), float(tt.y_meters)
+            if isinstance(el, RotationTarget):
+                return float(el.x_meters), float(el.y_meters)
+            return None
+        # Collect indices of anchor elements (translation targets and waypoints)
+        anchor_indices = [i for i, e in enumerate(elems) if isinstance(e, (TranslationTarget, Waypoint))]
+        if len(anchor_indices) < 2:
+            return  # not enough anchors to form segments
+        changed = False
+        # Iterate over each consecutive anchor pair
+        for seg_idx in range(len(anchor_indices) - 1):
+            start_idx = anchor_indices[seg_idx]
+            end_idx = anchor_indices[seg_idx + 1]
+            # Gather rotation elements between anchors
+            between_indices = [j for j in range(start_idx + 1, end_idx) if isinstance(elems[j], RotationTarget)]
+            if len(between_indices) < 2:
+                continue  # nothing to reorder for this segment
+            # Anchor positions and vector
+            ax, ay = _pos(elems[start_idx])
+            bx, by = _pos(elems[end_idx])
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom == 0:
+                continue  # degenerate segment – skip
+            # Compute parametric t for each rotation (projection onto AB, clamped to [0,1])
+            rot_t_pairs = []  # (index, t)
+            for j in between_indices:
+                rx, ry = _pos(elems[j])
+                t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+                rot_t_pairs.append((j, t))
+            # Desired order based on increasing t
+            rot_t_pairs.sort(key=lambda p: p[1])
+            desired_order = [idx for idx, _ in rot_t_pairs]
+            # Current order (model list order) is just between_indices
+            if between_indices == desired_order:
+                continue  # already correct
+            changed = True
+            # Extract the rotation elements in desired order BEFORE modifying the list
+            desired_elements = [elems[idx] for idx in desired_order]
+            # Remove all rotation elements between anchors (iterate in reverse to keep indices valid)
+            for j in reversed(between_indices):
+                elems.pop(j)
+            # Re-insert in correct order starting right after start_idx
+            insert_at = start_idx + 1
+            for el in desired_elements:
+                elems.insert(insert_at, el)
+                insert_at += 1
+            # After first successful reorder we stop – another call will evaluate remaining segments
+            break
+        if changed:
+            # Rebuild UI and notify listeners
+            self.rebuild_points_list()
+            self.modelStructureChanged.emit()
+```
+
+### ui/config_dialog.py
+```
+from __future__ import annotations
+
+from typing import Callable, Dict, Optional
+
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QVBoxLayout,
+    QDoubleSpinBox,
+)
+from PySide6.QtCore import Qt
+
+
+class ConfigDialog(QDialog):
+    """Dialog to edit config.json values.
+
+    Shows robot dimensions and optional default values.
+    """
+
+    def __init__(self, parent=None, existing_config: Optional[Dict[str, float]] = None, on_change: Optional[Callable[[str, float], None]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Config")
+        self.setModal(True)
+        self._spins: Dict[str, QDoubleSpinBox] = {}
+        cfg = existing_config or {}
+        self._on_change = on_change
+
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        root.addLayout(form)
+
+        def add_spin(key: str, label: str, default: float, rng: tuple[float, float], step: float = 0.01):
+            spin = QDoubleSpinBox(self)
+            spin.setDecimals(4)
+            spin.setSingleStep(step)
+            spin.setRange(rng[0], rng[1])
+            spin.setValue(float(cfg.get(key, default)))
+            form.addRow(QLabel(label), spin)
+            self._spins[key] = spin
+            # Live autosave via callback
+            spin.valueChanged.connect(lambda _v, k=key, w=spin: self._emit_change(k, float(w.value())))
+
+        # Robot dimensions
+        add_spin("robot_length_meters", "Robot Length (m)", cfg.get("robot_length_meters", 0.60) or 0.60, (0.05, 5.0), 0.01)
+        add_spin("robot_width_meters", "Robot Width (m)", cfg.get("robot_width_meters", 0.60) or 0.60, (0.05, 5.0), 0.01)
+
+        # Optional defaults
+        add_spin("final_velocity_meters_per_sec", "Default Final Velocity (m/s)", float(cfg.get("final_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 15.0), 0.1)
+        add_spin("max_velocity_meters_per_sec", "Default Max Velocity (m/s)", float(cfg.get("max_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 15.0), 0.1)
+        add_spin("max_acceleration_meters_per_sec2", "Default Max Accel (m/s²)", float(cfg.get("max_acceleration_meters_per_sec2", 0.0) or 0.0), (0.0, 20.0), 0.1)
+        add_spin("intermediate_handoff_radius_meters", "Default Handoff Radius (m)", float(cfg.get("intermediate_handoff_radius_meters", 0.0) or 0.0), (0.0, 5.0), 0.05)
+        add_spin("max_velocity_deg_per_sec", "Default Max Rot Vel (deg/s)", float(cfg.get("max_velocity_deg_per_sec", 0.0) or 0.0), (0.0, 720.0), 1.0)
+        add_spin("max_acceleration_deg_per_sec2", "Default Max Rot Accel (deg/s²)", float(cfg.get("max_acceleration_deg_per_sec2", 0.0) or 0.0), (0.0, 7200.0), 1.0)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, orientation=Qt.Horizontal, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def get_values(self) -> Dict[str, float]:
+        result: Dict[str, float] = {}
+        for k, spin in self._spins.items():
+            result[k] = float(spin.value())
+        return result
+
+    def _emit_change(self, key: str, value: float):
+        if self._on_change is not None:
+            try:
+                self._on_change(key, float(value))
+            except Exception:
+                pass
+
+
+
+```
+
+### ui/canvas.py
+```
+from __future__ import annotations
+import math
+from typing import List, Optional, Tuple
+
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QTransform
+from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView
+
+from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
+
+
+FIELD_LENGTH_METERS = 16.54
+FIELD_WIDTH_METERS = 8.21
+
+# Element visual constants (in meters)
+# Defaults; can be overridden at runtime from config
+ELEMENT_RECT_WIDTH_M = 0.60
+ELEMENT_RECT_HEIGHT_M = 0.60
+ELEMENT_CIRCLE_RADIUS_M = 0.20  # radius for circle elements
+TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
+OUTLINE_THIN_M = 0.06     # thin outline (e.g., rotation dashed)
+OUTLINE_THICK_M = 0.06    # thicker outline (e.g., translation aesthetic)
+CONNECT_LINE_THICKNESS_M = 0.05
+HANDLE_LINK_THICKNESS_M = 0.03
+HANDLE_RADIUS_M = 0.12
+HANDLE_DISTANCE_M = 0.70
+OUTLINE_EDGE_PEN = QPen(QColor("#222222"), 0.02)
+
+
+class CircleElementItem(QGraphicsEllipseItem):
+    def __init__(
+        self,
+        canvas_view: 'CanvasView',
+        center_m: QPointF,
+        index_in_model: int,
+        *,
+        filled_color: Optional[QColor],
+        outline_color: Optional[QColor],
+        dashed_outline: bool,
+        triangle_color: Optional[QColor],
+    ):
+        super().__init__()
+        self.canvas_view = canvas_view
+        self.index_in_model = index_in_model
+        # Local rect centered at origin so rotation occurs around center
+        self.setRect(QRectF(-ELEMENT_CIRCLE_RADIUS_M, -ELEMENT_CIRCLE_RADIUS_M, ELEMENT_CIRCLE_RADIUS_M * 2, ELEMENT_CIRCLE_RADIUS_M * 2))
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+        # Pen/brush
+        # Use thicker border for solid-outlined elements and thinner for dashed
+        thickness = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
+        pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
+                   thickness if outline_color is not None else 0.0)
+        if dashed_outline:
+            pen.setStyle(Qt.DashLine)
+        self.setPen(pen)
+        if filled_color is not None:
+            self.setBrush(QBrush(filled_color))
+        else:
+            self.setBrush(Qt.NoBrush)
+        # Interactivity flags
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setZValue(10)
+        # Inscribed triangle as child so it rotates/moves with parent (only if triangle_color is provided)
+        self.triangle_item = None
+        if triangle_color is not None:
+            self.triangle_item = QGraphicsPolygonItem(self)
+            self._build_triangle(triangle_color)
+        # Current rotation in model radians (y-up)
+        self._angle_radians: float = 0.0
+
+    def _build_triangle(self, color: QColor):
+        if self.triangle_item is None:
+            return
+        # Triangle pointing to +X in local coordinates (to the right)
+        # Size relative to circle diameter
+        base_size = ELEMENT_CIRCLE_RADIUS_M * 2 * TRIANGLE_REL_SIZE
+        half_base = base_size * 0.5
+        height = base_size
+        # Define a simple isosceles triangle centered at origin pointing right:
+        # points: tip at (height/2, 0), back upper (-height/2, half_base), back lower (-height/2, -half_base)
+        points = [
+            QPointF(height / 2.0, 0.0),
+            QPointF(-height / 2.0, half_base),
+            QPointF(-height / 2.0, -half_base),
+        ]
+        polygon = QPolygonF(points)
+        self.triangle_item.setPolygon(polygon)
+        self.triangle_item.setBrush(QBrush(color))
+        self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+        self.triangle_item.setZValue(self.zValue() + 1)
+
+    def set_center(self, center_m: QPointF):
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+
+    def set_angle_radians(self, radians: float):
+        self._angle_radians = radians
+        # Convert model (y-up) to scene (y-down) and set degrees
+        angle_scene = -radians
+        self.setRotation(math.degrees(angle_scene))
+
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_pos: QPointF = value
+            # Safety check for canvas_view reference
+            if not hasattr(self, 'canvas_view') or self.canvas_view is None:
+                return value
+            # Constrain movement based on element type and neighbors
+            try:
+                cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
+                return QPointF(cx, cy)
+            except (AttributeError, TypeError, IndexError):
+                return value
+        elif change == QGraphicsItem.ItemPositionHasChanged:
+            # Now that the item's position is committed, notify for visual updates and model sync
+            if not getattr(self.canvas_view, "_suppress_live_events", False):
+                try:
+                    x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+                    self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+                except (AttributeError, TypeError):
+                    pass
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        # Prepare for potential drag
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_pressed(self.index_in_model)
+                self.canvas_view._on_item_clicked(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Clear any drag state
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_released(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mouseReleaseEvent(event)
+
+
+class RectElementItem(QGraphicsRectItem):
+    def __init__(
+        self,
+        canvas_view: 'CanvasView',
+        center_m: QPointF,
+        index_in_model: int,
+        *,
+        filled_color: Optional[QColor],
+        outline_color: Optional[QColor],
+        dashed_outline: bool,
+        triangle_color: QColor,
+    ):
+        super().__init__()
+        self.canvas_view = canvas_view
+        self.index_in_model = index_in_model
+        # Local rect centered at origin so rotation occurs around center
+        rw = getattr(self.canvas_view, "robot_length_m", ELEMENT_RECT_WIDTH_M)
+        rh = getattr(self.canvas_view, "robot_width_m", ELEMENT_RECT_HEIGHT_M)
+        self.setRect(QRectF(-rw / 2.0, -rh / 2.0, rw, rh))
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+        # Pen/brush
+        # Use thicker border for solid-outlined elements and thinner for dashed
+        thickness = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
+        pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
+                   thickness if outline_color is not None else 0.0)
+        if dashed_outline:
+            pen.setStyle(Qt.DashLine)
+        self.setPen(pen)
+        if filled_color is not None:
+            self.setBrush(QBrush(filled_color))
+        else:
+            self.setBrush(Qt.NoBrush)
+        # Interactivity flags
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setZValue(10)
+        # Inscribed triangle as child so it rotates/moves with parent
+        self.triangle_item = QGraphicsPolygonItem(self)
+        self._build_triangle(triangle_color)
+        # Current rotation in model radians (y-up)
+        self._angle_radians: float = 0.0
+
+    def _build_triangle(self, color: QColor):
+        # Triangle pointing to +X in local coordinates (to the right)
+        # Size relative to rect
+        rw = getattr(self.canvas_view, "robot_length_m", ELEMENT_RECT_WIDTH_M)
+        rh = getattr(self.canvas_view, "robot_width_m", ELEMENT_RECT_HEIGHT_M)
+        base_size = min(rw, rh) * TRIANGLE_REL_SIZE
+        half_base = base_size * 0.5
+        height = base_size
+        # Define a simple isosceles triangle centered at origin pointing right:
+        # points: tip at (height/2, 0), back upper (-height/2, half_base), back lower (-height/2, -half_base)
+        points = [
+            QPointF(height / 2.0, 0.0),
+            QPointF(-height / 2.0, half_base),
+            QPointF(-height / 2.0, -half_base),
+        ]
+        polygon = QPolygonF(points)
+        self.triangle_item.setPolygon(polygon)
+        self.triangle_item.setBrush(QBrush(color))
+        self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+        self.triangle_item.setZValue(self.zValue() + 1)
+
+    def set_center(self, center_m: QPointF):
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+
+    def set_angle_radians(self, radians: float):
+        self._angle_radians = radians
+        # Convert model (y-up) to scene (y-down) and set degrees
+        angle_scene = -radians
+        self.setRotation(math.degrees(angle_scene))
+
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_pos: QPointF = value
+            # Safety check for canvas_view reference
+            if not hasattr(self, 'canvas_view') or self.canvas_view is None:
+                return value
+            # Constrain movement based on element type and neighbors
+            try:
+                cx, cy = self.canvas_view._constrain_scene_coords_for_index(self.index_in_model, new_pos.x(), new_pos.y())
+                return QPointF(cx, cy)
+            except (AttributeError, TypeError, IndexError):
+                return value
+        elif change == QGraphicsItem.ItemPositionHasChanged:
+            # Now that the item's position is committed, notify for visual updates and model sync
+            if not getattr(self.canvas_view, "_suppress_live_events", False):
+                try:
+                    x_m, y_m = self.canvas_view._model_from_scene(self.pos().x(), self.pos().y())
+                    self.canvas_view._on_item_live_moved(self.index_in_model, x_m, y_m)
+                except (AttributeError, TypeError):
+                    pass
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        # Prepare for potential drag
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_pressed(self.index_in_model)
+                self.canvas_view._on_item_clicked(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Clear any drag state
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_item_released(self.index_in_model)
+        except (AttributeError, TypeError):
+            pass
+        super().mouseReleaseEvent(event)
+
+
+class RotationHandle(QGraphicsEllipseItem):
+    def __init__(self, canvas_view: 'CanvasView', parent_center_item: RectElementItem, handle_distance_m: float, handle_radius_m: float, color: QColor):
+        super().__init__()
+        self.canvas_view = canvas_view
+        self.center_item = parent_center_item
+        self.handle_distance_m = handle_distance_m
+        self.handle_radius_m = handle_radius_m
+        # Flags to avoid re-entrant updates and distinguish user drags from programmatic syncs
+        self._dragging: bool = False
+        self._syncing: bool = False
+        self.setBrush(QBrush(color))
+        self.setPen(QPen(QColor("#222222"), 0.02))
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        # Ensure the handle itself is not selectable to avoid multi-item moves
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.setZValue(12)
+        self._angle_radians: float = 0.0
+        self.link_line = QGraphicsLineItem()
+        self.link_line.setPen(QPen(QColor("#888888"), HANDLE_LINK_THICKNESS_M))
+        self.link_line.setZValue(11)
+        # Local geometry centered on origin
+        self.setRect(QRectF(-handle_radius_m, -handle_radius_m, handle_radius_m * 2, handle_radius_m * 2))
+        # Initial placement
+        self.sync_to_angle()
+
+    def scene_items(self) -> List[QGraphicsItem]:
+        return [self.link_line, self]
+
+    def set_angle(self, radians: float):
+        self._angle_radians = radians
+        self.sync_to_angle()
+
+    def sync_to_angle(self):
+        # Programmatic sync: suppress re-entrant rotation notifications
+        self._syncing = True
+        try:
+            if not hasattr(self, 'center_item') or self.center_item is None:
+                return
+            cx = self.center_item.pos().x()
+            cy = self.center_item.pos().y()
+            # Convert model angle (y-up) to scene (y-down)
+            angle_scene = -self._angle_radians
+            hx = cx + math.cos(angle_scene) * self.handle_distance_m
+            hy = cy + math.sin(angle_scene) * self.handle_distance_m
+            self.setPos(QPointF(hx, hy))
+            self.link_line.setLine(cx, cy, hx, hy)
+        except (AttributeError, TypeError):
+            pass
+        finally:
+            self._syncing = False
+
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_center: QPointF = value
+            try:
+                if not hasattr(self, 'center_item') or self.center_item is None:
+                    return value
+                cx = self.center_item.pos().x()
+                cy = self.center_item.pos().y()
+                dx = new_center.x() - cx
+                dy = new_center.y() - cy
+                angle_scene = math.atan2(dy, dx)
+                # Constrain to ring distance by returning the adjusted position
+                hx = cx + math.cos(angle_scene) * self.handle_distance_m
+                hy = cy + math.sin(angle_scene) * self.handle_distance_m
+                self.link_line.setLine(cx, cy, hx, hy)
+                # Convert to model angle (y-up)
+                angle_model = -angle_scene
+                self._angle_radians = angle_model
+                # Only notify the canvas when the user is actively dragging
+                if not self._syncing and self._dragging:
+                    if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                        self.canvas_view._on_item_live_rotated(self.center_item.index_in_model, angle_model)
+                return QPointF(hx, hy)
+            except (AttributeError, TypeError, IndexError):
+                return value
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        # On rotation start, select the associated center item and clear any previous selection
+        # This prevents previously-selected items from being dragged inadvertently
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None and self.canvas_view.graphics_scene:
+                self.canvas_view.graphics_scene.clearSelection()
+            if hasattr(self, 'center_item') and self.center_item is not None:
+                self.center_item.setSelected(True)
+                # Notify outside listeners of selection change (sidebar, etc.)
+                if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                    self.canvas_view._on_item_clicked(self.center_item.index_in_model)
+        except Exception:
+            pass
+        # Prevent center item from moving while rotating
+        if hasattr(self, 'center_item') and self.center_item is not None:
+            self.center_item.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self._dragging = True
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if hasattr(self, 'center_item') and self.center_item is not None:
+            self.center_item.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+
+class CanvasView(QGraphicsView):
+    # Emitted when the user selects an element on the canvas
+    elementSelected = Signal(int)  # index
+    # Emitted when the user drags an element to a new location (meters)
+    elementMoved = Signal(int, float, float)  # index, x_m, y_m
+    # Emitted when the user adjusts a rotation (radians)
+    elementRotated = Signal(int, float)  # index, radians
+    # Emitted once when the user releases the mouse after dragging an item
+    elementDragFinished = Signal(int)  # index
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+        self._is_fitting = False
+        # Guard to avoid emitting elementMoved while performing programmatic updates
+        self._suppress_live_events: bool = False
+        # Cache of rotation t parameters during an anchor drag (index -> t in [0,1])
+        self._rotation_t_cache: Optional[dict[int, float]] = None
+        self._anchor_drag_in_progress: bool = False
+
+        # Robot element rectangle dimensions (configurable at runtime)
+        self.robot_length_m: float = ELEMENT_RECT_WIDTH_M
+        self.robot_width_m: float = ELEMENT_RECT_HEIGHT_M
+
+        self.graphics_scene = QGraphicsScene(self)
+        self.setScene(self.graphics_scene)
+        self.graphics_scene.setSceneRect(0, 0, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS)
+
+        self._field_pixmap_item: Optional[QGraphicsPixmapItem] = None
+        self._path: Optional[Path] = None
+        self._items: List[Tuple[str, RectElementItem, Optional[RotationHandle]]] = []
+        self._connect_lines: List[QGraphicsLineItem] = []
+
+        self._load_field_background("assets/field25.png")
+
+    def _load_field_background(self, image_path: str):
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            return
+        self._field_pixmap_item = QGraphicsPixmapItem(pixmap)
+        self._field_pixmap_item.setZValue(-10)
+        # Scale pixmap from pixels into meters preserving aspect ratio
+        if pixmap.width() > 0 and pixmap.height() > 0:
+            s = min(FIELD_LENGTH_METERS / float(pixmap.width()), FIELD_WIDTH_METERS / float(pixmap.height()))
+            self._field_pixmap_item.setTransform(QTransform().scale(s, s))
+            # Position so bottom-left aligns with (0,0) model → account for scene y-down
+            h_scaled = pixmap.height() * s
+            self._field_pixmap_item.setPos(0.0, FIELD_WIDTH_METERS - h_scaled)
+        self.graphics_scene.addItem(self._field_pixmap_item)
+
+    def set_path(self, path: Path):
+        self._path = path
+        self._rebuild_items()
+        # After rebuilding, ensure rotation items are properly positioned on their constraint lines
+        if self._path is not None:
+            self._reproject_rotation_items_in_scene()
+
+    def set_robot_dimensions(self, length_m: float, width_m: float):
+        # Update and rebuild items to apply new sizes
+        try:
+            self.robot_length_m = float(length_m)
+            self.robot_width_m = float(width_m)
+        except Exception:
+            return
+        self._rebuild_items()
+        if self._path is not None:
+            self._reproject_rotation_items_in_scene()
+
+    def refresh_from_model(self):
+        # Update item positions and angles from model without rebuilding structure
+        if self._path is None or not self._items:
+            return
+        self._suppress_live_events = True
+        try:
+            count = min(len(self._items), len(self._path.path_elements))
+            for i in range(count):
+                try:
+                    kind, item, handle = self._items[i]
+                    if item is None:
+                        continue
+                    # Skip if the C++ object is gone
+                    try:
+                        if item.scene() is None:
+                            continue
+                    except RuntimeError:
+                        continue
+                    element = self._path.path_elements[i]
+                    pos = self._element_position(element)
+                    item.set_center(QPointF(pos[0], pos[1]))
+                    # Set rotation for waypoint/rotation; translation uses previous orientation source
+                    if kind in ("rotation", "waypoint"):
+                        angle = self._element_rotation(element)
+                    else:
+                        angle = self._angle_for_translation_index(i)
+                    item.set_angle_radians(angle)
+                    if handle is not None:
+                        handle.set_angle(angle)
+                        # Ensure rotation handle is properly synchronized
+                        if kind == "rotation":
+                            handle.sync_to_angle()
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
+        finally:
+            self._suppress_live_events = False
+        self._update_connecting_lines()
+        # Ensure rotation items are properly positioned on their constraint lines
+        if self._path is not None:
+            self._reproject_rotation_items_in_scene()
+
+    def refresh_rotations_from_model(self):
+        # Update only rotation items from the model
+        if self._path is None or not self._items:
+            return
+        max_index = len(self._path.path_elements) - 1
+        for i, (kind, item, handle) in enumerate(self._items):
+            if i > max_index:
+                break
+            if kind != 'rotation':
+                continue
+            try:
+                element = self._path.path_elements[i]
+                pos = self._element_position(element)
+                item.set_center(QPointF(pos[0], pos[1]))
+                if handle is not None:
+                    angle = self._element_rotation(element)
+                    item.set_angle_radians(angle)
+                    handle.set_angle(angle)
+                    # Ensure rotation handle is properly synchronized
+                    handle.sync_to_angle()
+            except (IndexError, TypeError, AttributeError):
+                # Skip invalid items to prevent crashes
+                continue
+        self._update_connecting_lines()
+
+    def select_index(self, index: int):
+        if index is None or index < 0 or index >= len(self._items):
+            return
+        # visually select (defensively handle deleted/invalid C++ objects)
+        try:
+            _, item, _ = self._items[index]
+        except Exception:
+            return
+        if item is None:
+            return
+        # If the underlying C++ object has been deleted, PySide can segfault.
+        # Check that the item is still attached to a scene before using it.
+        try:
+            if getattr(item, 'scene', None) is None:
+                return
+            if item.scene() is None:
+                return
+        except RuntimeError:
+            # Wrapped C++ object was deleted
+            return
+        except Exception:
+            return
+        try:
+            if hasattr(self, 'graphics_scene') and self.graphics_scene is not None:
+                self.graphics_scene.clearSelection()
+            item.setSelected(True)
+            # centerOn can crash during rapid resize/fullscreen; defer to event loop
+            QTimer.singleShot(0, lambda it=item: self._safe_center_on(it))
+        except RuntimeError:
+            # e.g., wrapped C++ object has been deleted
+            return
+        except Exception:
+            return
+
+    def _safe_center_on(self, item: QGraphicsItem):
+        """Center on item if still valid; separated to use in singleShot."""
+        try:
+            if item is None:
+                return
+            # Re-validate C++ object
+            if getattr(item, 'scene', None) is None:
+                return
+            if item.scene() is None:
+                return
+            self.centerOn(item)
+        except RuntimeError:
+            return
+        except Exception:
+            return
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Defer fit to avoid re-entrancy during fullscreen transitions
+        QTimer.singleShot(0, self._fit_to_scene)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Defer initial fit until after show completes
+        QTimer.singleShot(0, self._fit_to_scene)
+
+    def _fit_to_scene(self):
+        if self._is_fitting:
+            return
+        self._is_fitting = True
+        try:
+            if hasattr(self, 'graphics_scene') and self.graphics_scene is not None:
+                rect = self.graphics_scene.sceneRect()
+                if rect.width() > 0 and rect.height() > 0:
+                    # Guard against rare crashes during rapid resizes/fullscreen toggles
+                    try:
+                        self.fitInView(rect, Qt.KeepAspectRatio)
+                    except RuntimeError:
+                        # Underlying view/scene not ready
+                        pass
+        except (AttributeError, TypeError):
+            # If there's any error, just return safely
+            pass
+        finally:
+            self._is_fitting = False
+
+    # Internal helpers
+    def _clear_scene_items(self):
+        for _, item, handle in self._items:
+            self.graphics_scene.removeItem(item)
+            if handle is not None:
+                for sub in handle.scene_items():
+                    self.graphics_scene.removeItem(sub)
+        for line in self._connect_lines:
+            self.graphics_scene.removeItem(line)
+        self._items.clear()
+        self._connect_lines.clear()
+
+    def _rebuild_items(self):
+        self._clear_scene_items()
+        if self._path is None:
+            return
+
+        for i, element in enumerate(self._path.path_elements):
+            pos = self._element_position(element)
+
+            # Choose visuals by element type
+            if isinstance(element, TranslationTarget):
+                kind = "translation"
+                item = CircleElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=QColor("#3aa3ff"),
+                    outline_color=QColor("#3aa3ff"),
+                    dashed_outline=False,
+                    triangle_color=None,
+                )
+                rotation_handle = None
+                item.set_angle_radians(self._angle_for_translation_index(i))
+            elif isinstance(element, RotationTarget):
+                kind = "rotation"
+                item = RectElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=None,
+                    outline_color=QColor("#50c878"),
+                    dashed_outline=True,
+                    triangle_color=QColor("#50c878"),
+                )
+                rotation_handle = RotationHandle(self, item, handle_distance_m=HANDLE_DISTANCE_M, handle_radius_m=HANDLE_RADIUS_M, color=QColor("#50c878"))
+                item.set_angle_radians(self._element_rotation(element))
+                # Ensure rotation handle is properly synchronized
+                rotation_handle.set_angle(self._element_rotation(element))
+                rotation_handle.sync_to_angle()
+            elif isinstance(element, Waypoint):
+                kind = "waypoint"
+                item = RectElementItem(
+                    self,
+                    QPointF(pos[0], pos[1]),
+                    i,
+                    filled_color=QColor("#ff7f3a"),
+                    outline_color=QColor("#ff7f3a"),
+                    dashed_outline=False,
+                    triangle_color=QColor("#000000"),
+                )
+                rotation_handle = RotationHandle(self, item, handle_distance_m=HANDLE_DISTANCE_M, handle_radius_m=HANDLE_RADIUS_M, color=QColor("#ff7f3a"))
+                # Initialize rotation from waypoint's rotation target
+                item.set_angle_radians(self._element_rotation(element))
+                rotation_handle.set_angle(self._element_rotation(element))
+                rotation_handle.sync_to_angle()
+            else:
+                # Unknown, skip
+                continue
+
+            # Add to scene
+            # Guard against adding invalid items during resize/fullscreen
+            try:
+                self.graphics_scene.addItem(item)
+            except RuntimeError:
+                continue
+            if rotation_handle is not None:
+                for sub in rotation_handle.scene_items():
+                    try:
+                        self.graphics_scene.addItem(sub)
+                    except RuntimeError:
+                        continue
+
+            self._items.append((kind, item, rotation_handle))
+
+        # Build connecting lines in hierarchical order
+        self._build_connecting_lines()
+
+    def _angle_for_translation_index(self, index: int) -> float:
+        # Find the most recent orientation source (RotationTarget or Waypoint) before this index
+        if self._path is None or index <= 0:
+            return 0.0
+        for i in range(index - 1, -1, -1):
+            elem = self._path.path_elements[i]
+            if isinstance(elem, RotationTarget) or isinstance(elem, Waypoint):
+                return self._element_rotation(elem)
+        return 0.0
+
+    def _element_position(self, element: PathElement) -> Tuple[float, float]:
+        if isinstance(element, TranslationTarget):
+            return float(element.x_meters), float(element.y_meters)
+        if isinstance(element, RotationTarget):
+            return float(element.x_meters), float(element.y_meters)
+        if isinstance(element, Waypoint):
+            return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+        return 0.0, 0.0
+
+    def _element_rotation(self, element: PathElement) -> float:
+        if isinstance(element, RotationTarget):
+            return float(element.rotation_radians)
+        if isinstance(element, Waypoint):
+            return float(element.rotation_target.rotation_radians)
+        return 0.0
+
+    def _build_connecting_lines(self):
+        self._connect_lines = []
+        if not self._items:
+            return
+        try:
+            for i in range(len(self._items) - 1):
+                try:
+                    _, a, _ = self._items[i]
+                    _, b, _ = self._items[i + 1]
+                    if a is not None and b is not None:
+                        line = QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
+                        line.setPen(QPen(QColor("#cccccc"), CONNECT_LINE_THICKNESS_M))
+                        line.setZValue(5)
+                        self.graphics_scene.addItem(line)
+                        self._connect_lines.append(line)
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
+        except (IndexError, TypeError):
+            # If there's any error, just return safely
+            pass
+
+    def _update_connecting_lines(self):
+        if not self._items or not self._connect_lines:
+            return
+        try:
+            for i in range(len(self._connect_lines)):
+                if i >= len(self._items) - 1:
+                    break
+                try:
+                    _, a, _ = self._items[i]
+                    _, b, _ = self._items[i + 1]
+                    if a is not None and b is not None:
+                        self._connect_lines[i].setLine(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y())
+                except (IndexError, TypeError, AttributeError):
+                    # Skip invalid items to prevent crashes
+                    continue
+        except (IndexError, TypeError):
+            # If there's any error, just return safely
+            pass
+
+    # Live updates while dragging/rotating for visuals, and emit changes out for model syncing
+    def _on_item_live_moved(self, index: int, x_m: float, y_m: float):
+        # Safety check to prevent segmentation faults
+        if index < 0 or index >= len(self._items):
+            return
+            
+        self._update_connecting_lines()
+        # Keep rotation handle linked to moved point
+        try:
+            kind, _, handle = self._items[index]
+            if handle is not None:
+                handle.sync_to_angle()
+        except (IndexError, TypeError):
+            return
+            
+        # Emit move for the item being dragged first so model updates promptly
+        self.elementMoved.emit(index, x_m, y_m)
+        # If an anchor moved, reproject any rotation items so they stay inline in real-time
+        if kind in ('translation', 'waypoint'):
+            self._reproject_rotation_items_in_scene()
+
+    def _on_item_live_rotated(self, index: int, angle_radians: float):
+        # Safety check to prevent segmentation faults
+        if index < 0 or index >= len(self._items):
+            return
+            
+        # Update visual rotation immediately
+        try:
+            kind, item, handle = self._items[index]
+            if kind in ("rotation", "waypoint"):
+                item.set_angle_radians(angle_radians)
+                if handle is not None:
+                    handle.set_angle(angle_radians)
+        except (IndexError, TypeError):
+            return
+            
+        self.elementRotated.emit(index, angle_radians)
+        # Also update orientations of translation elements that depend on this orientation source
+        # A translation's orientation is taken from the nearest previous rotation/waypoint
+        for j, (k, it, _) in enumerate(self._items):
+            if k == 'translation':
+                try:
+                    it.set_angle_radians(self._angle_for_translation_index(j))
+                except (AttributeError, TypeError):
+                    continue
+
+    def _on_item_clicked(self, index: int):
+        self.elementSelected.emit(index)
+
+    # Coordinate conversions between model meters (y-up) and scene (y-down)
+    def _scene_from_model(self, x_m: float, y_m: float) -> QPointF:
+        return QPointF(x_m, FIELD_WIDTH_METERS - y_m)
+
+    def _model_from_scene(self, x_s: float, y_s: float) -> Tuple[float, float]:
+        return float(x_s), float(FIELD_WIDTH_METERS - y_s)
+
+    def _clamp_scene_coords(self, x_s: float, y_s: float) -> Tuple[float, float]:
+        min_x, min_y = 0.0, 0.0
+        max_x, max_y = FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+        return max(min_x, min(x_s, max_x)), max(min_y, min(y_s, max_y))
+
+    def _constrain_scene_coords_for_index(self, index: int, x_s: float, y_s: float) -> Tuple[float, float]:
+        # Default clamp to field bounds
+        x_s, y_s = self._clamp_scene_coords(x_s, y_s)
+        if index < 0 or index >= len(self._items):
+            return x_s, y_s
+        try:
+            kind, _, _ = self._items[index]
+        except (IndexError, TypeError):
+            return x_s, y_s
+            
+        # Only constrain rotation elements along line segment between nearest translation/waypoint neighbors
+        if kind != 'rotation':
+            return x_s, y_s
+        prev_pos, next_pos = self._find_neighbor_item_positions(index)
+        if prev_pos is None or next_pos is None:
+            return x_s, y_s
+        ax, ay = prev_pos
+        bx, by = next_pos
+        dx = bx - ax
+        dy = by - ay
+        denom = dx * dx + dy * dy
+        if denom <= 0.0:
+            return x_s, y_s
+        t = ((x_s - ax) * dx + (y_s - ay) * dy) / denom
+        # Clamp to segment
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        # Ensure still inside field bounds
+        return self._clamp_scene_coords(proj_x, proj_y)
+
+    def _find_neighbor_item_positions(self, index: int) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        # Search upward for nearest translation/waypoint
+        prev_pos: Optional[Tuple[float, float]] = None
+        for i in range(index - 1, -1, -1):
+            try:
+                kind, item, _ = self._items[i]
+                if kind in ('translation', 'waypoint'):
+                    prev_pos = (item.pos().x(), item.pos().y())
+                    break
+            except (IndexError, TypeError, AttributeError):
+                continue
+        next_pos: Optional[Tuple[float, float]] = None
+        for i in range(index + 1, len(self._items)):
+            try:
+                kind, item, _ = self._items[i]
+                if kind in ('translation', 'waypoint'):
+                    next_pos = (item.pos().x(), item.pos().y())
+                    break
+            except (IndexError, TypeError, AttributeError):
+                continue
+        return prev_pos, next_pos
+
+    def _reproject_rotation_items_in_scene(self):
+        # Adjust rotation items to lie on the segment between their current visible neighbors
+        # Maintain the initial t ratio along the segment during an anchor drag
+        self._suppress_live_events = True
+        try:
+            for i, (kind, item, handle) in enumerate(self._items):
+                if kind != 'rotation':
+                    continue
+                prev_pos, next_pos = self._find_neighbor_item_positions(i)
+                if prev_pos is None or next_pos is None:
+                    # Skip rotation items without valid neighbors
+                    continue
+                ax, ay = prev_pos
+                bx, by = next_pos
+                dx = bx - ax
+                dy = by - ay
+                denom = dx * dx + dy * dy
+                if denom <= 0.0:
+                    # Skip if neighbors are at the same position
+                    continue
+                # Use cached t if available to maintain ratio; otherwise compute from current scene position
+                if self._rotation_t_cache is not None and i in self._rotation_t_cache:
+                    t = self._rotation_t_cache[i]
+                else:
+                    # Use current scene position for t calculation to ensure accurate positioning
+                    try:
+                        rx, ry = item.pos().x(), item.pos().y()
+                    except (AttributeError, TypeError):
+                        continue
+                    t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                proj_x = ax + t * dx
+                proj_y = ay + t * dy
+                # Move without emitting signals
+                try:
+                    item.setPos(proj_x, proj_y)
+                    if handle is not None:
+                        handle.sync_to_angle()
+                except (AttributeError, TypeError):
+                    continue
+            # Update connecting lines once after all moves
+            self._update_connecting_lines()
+        finally:
+            self._suppress_live_events = False
+
+    def _compute_rotation_t_cache(self) -> dict[int, float]:
+        t_by_index: dict[int, float] = {}
+        for i, (kind, item, _) in enumerate(self._items):
+            if kind != 'rotation':
+                continue
+            prev_pos, next_pos = self._find_neighbor_item_positions(i)
+            if prev_pos is None or next_pos is None:
+                continue
+            ax, ay = prev_pos
+            bx, by = next_pos
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom <= 0.0:
+                continue
+            rx, ry = item.pos().x(), item.pos().y()
+            t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            t_by_index[i] = float(t)
+        return t_by_index
+
+    def _on_item_pressed(self, index: int):
+        # If an anchor is pressed, record current t for rotation items
+        if index < 0 or index >= len(self._items):
+            return
+        kind, _, _ = self._items[index]
+        if kind in ('translation', 'waypoint'):
+            self._anchor_drag_in_progress = True
+            self._rotation_t_cache = self._compute_rotation_t_cache()
+
+    def _on_item_released(self, index: int):
+        # If an anchor drag just finished, commit current rotation positions to the model
+        if self._anchor_drag_in_progress:
+            try:
+                for i, (kind, item, _) in enumerate(self._items):
+                    if kind != 'rotation':
+                        continue
+                    mx, my = self._model_from_scene(item.pos().x(), item.pos().y())
+                    self.elementMoved.emit(i, mx, my)
+            finally:
+                self._anchor_drag_in_progress = False
+                self._rotation_t_cache = None
+
+        # Notify that a drag operation for this item has completed (for any item type)
+        self.elementDragFinished.emit(index)
+
+
+
+```
+
+### utils/temp.py
+```
+
+```
+
+### utils/project_manager.py
+```
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, is_dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from PySide6.QtCore import QSettings
+
+from models.path_model import Path, PathElement, RotationTarget, TranslationTarget, Waypoint
+
+
+DEFAULT_CONFIG: Dict[str, float] = {
+    "robot_length_meters": 0.60,
+    "robot_width_meters": 0.60,
+    # Optional property defaults (degrees where applicable)
+    "final_velocity_meters_per_sec": 0.0,
+    "max_velocity_meters_per_sec": 0.0,
+    "max_acceleration_meters_per_sec2": 0.0,
+    "intermediate_handoff_radius_meters": 0.0,
+    "max_velocity_deg_per_sec": 0.0,
+    "max_acceleration_deg_per_sec2": 0.0,
+}
+
+EXAMPLE_CONFIG: Dict[str, float] = {
+    "robot_length_meters": 0.70,
+    "robot_width_meters": 0.62,
+    "final_velocity_meters_per_sec": 1.0,
+    "max_velocity_meters_per_sec": 3.0,
+    "max_acceleration_meters_per_sec2": 2.5,
+    "intermediate_handoff_radius_meters": 0.4,
+    "max_velocity_deg_per_sec": 180.0,
+    "max_acceleration_deg_per_sec2": 360.0,
+}
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+class ProjectManager:
+    """Handles project directory, config.json, and path JSON load/save.
+
+    Persists last project dir and last opened path via QSettings.
+    """
+
+    SETTINGS_ORG = "FRC-PTP-GUI"
+    SETTINGS_APP = "FRC-PTP-GUI"
+    KEY_LAST_PROJECT_DIR = "project/last_project_dir"
+    KEY_LAST_PATH_FILE = "project/last_path_file"
+    KEY_RECENT_PROJECTS = "project/recent_projects"
+
+    def __init__(self):
+        self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self.project_dir: Optional[str] = None
+        self.config: Dict[str, Any] = DEFAULT_CONFIG.copy()
+        self.current_path_file: Optional[str] = None  # filename like "example.json"
+
+    # --------------- Project directory ---------------
+    def set_project_dir(self, directory: str) -> None:
+        directory = os.path.abspath(directory)
+        self.project_dir = directory
+        self.settings.setValue(self.KEY_LAST_PROJECT_DIR, directory)
+        self.ensure_project_structure()
+        # Track recents only after ensuring structure exists
+        self._add_recent_project(directory)
+        self.load_config()
+
+    def get_paths_dir(self) -> Optional[str]:
+        if not self.project_dir:
+            return None
+        return os.path.join(self.project_dir, "paths")
+
+    def ensure_project_structure(self) -> None:
+        if not self.project_dir:
+            return
+        _ensure_dir(self.project_dir)
+        paths_dir = os.path.join(self.project_dir, "paths")
+        _ensure_dir(paths_dir)
+        # Create default config if missing
+        cfg_path = os.path.join(self.project_dir, "config.json")
+        if not os.path.exists(cfg_path):
+            self.save_config(DEFAULT_CONFIG.copy())
+        # Create example files if paths folder empty
+        try:
+            if not os.listdir(paths_dir):
+                self._create_example_paths(paths_dir)
+        except Exception:
+            pass
+
+    def has_valid_project(self) -> bool:
+        if not self.project_dir:
+            return False
+        cfg = os.path.join(self.project_dir, "config.json")
+        paths = os.path.join(self.project_dir, "paths")
+        return os.path.isdir(self.project_dir) and os.path.isfile(cfg) and os.path.isdir(paths)
+
+    def load_last_project(self) -> bool:
+        last_dir = self.settings.value(self.KEY_LAST_PROJECT_DIR, type=str)
+        if not last_dir:
+            return False
+        # Validate without creating any files. Only accept if already valid.
+        cfg = os.path.join(last_dir, "config.json")
+        paths = os.path.join(last_dir, "paths")
+        if os.path.isdir(last_dir) and os.path.isfile(cfg) and os.path.isdir(paths):
+            self.set_project_dir(last_dir)
+            return True
+        return False
+
+    # --------------- Recent Projects ---------------
+    def recent_projects(self) -> List[str]:
+        raw = self.settings.value(self.KEY_RECENT_PROJECTS)
+        if not raw:
+            return []
+        # QSettings may return list or str
+        if isinstance(raw, list):
+            items = [str(x) for x in raw]
+        else:
+            try:
+                items = json.loads(str(raw))
+                if not isinstance(items, list):
+                    items = []
+            except Exception:
+                items = []
+        # Filter only existing dirs
+        items = [p for p in items if isinstance(p, str) and os.path.isdir(p)]
+        # unique while preserving order
+        seen = set()
+        uniq = []
+        for p in items:
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        return uniq[:10]
+
+    def _add_recent_project(self, directory: str) -> None:
+        if not directory:
+            return
+        items = self.recent_projects()
+        # move to front
+        items = [d for d in items if d != directory]
+        items.insert(0, directory)
+        items = items[:10]
+        # Store as JSON string to be robust
+        try:
+            self.settings.setValue(self.KEY_RECENT_PROJECTS, json.dumps(items))
+        except Exception:
+            pass
+
+    # --------------- Config ---------------
+    def load_config(self) -> Dict[str, Any]:
+        if not self.project_dir:
+            return self.config
+        cfg_path = os.path.join(self.project_dir, "config.json")
+        try:
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    # Merge onto defaults so missing keys get defaults
+                    merged = DEFAULT_CONFIG.copy()
+                    merged.update(data)
+                    self.config = merged
+        except Exception:
+            # Keep existing config on error
+            pass
+        return self.config
+
+    def save_config(self, new_config: Optional[Dict[str, Any]] = None) -> None:
+        if new_config is not None:
+            self.config.update(new_config)
+        if not self.project_dir:
+            return
+        cfg_path = os.path.join(self.project_dir, "config.json")
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2)
+        except Exception:
+            pass
+
+    def get_default_optional_value(self, key: str) -> Optional[float]:
+        # Returns configured default if present, else None
+        value = self.config.get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # --------------- Paths listing ---------------
+    def list_paths(self) -> List[str]:
+        paths_dir = self.get_paths_dir()
+        if not paths_dir or not os.path.isdir(paths_dir):
+            return []
+        files = [f for f in os.listdir(paths_dir) if f.lower().endswith(".json")]
+        files.sort()
+        return files
+
+    # --------------- Path IO ---------------
+    def load_path(self, filename: str) -> Optional[Path]:
+        """Load a path from the paths directory by filename (e.g., 'my_path.json')."""
+        paths_dir = self.get_paths_dir()
+        if not self.project_dir or not paths_dir:
+            return None
+        filepath = os.path.join(paths_dir, filename)
+        if not os.path.isfile(filepath):
+            return None
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            path = self._deserialize_path(data)
+            self.current_path_file = filename
+            # Remember in settings
+            self.settings.setValue(self.KEY_LAST_PATH_FILE, filename)
+            return path
+        except Exception:
+            return None
+
+    def save_path(self, path: Path, filename: Optional[str] = None) -> Optional[str]:
+        """Save path to filename in the paths dir. If filename is None, uses current_path_file
+        or creates 'untitled.json'. Returns the filename used on success.
+        """
+        if filename is None:
+            filename = self.current_path_file
+        if filename is None:
+            filename = "untitled.json"
+        paths_dir = self.get_paths_dir()
+        if not self.project_dir or not paths_dir:
+            return None
+        _ensure_dir(paths_dir)
+        filepath = os.path.join(paths_dir, filename)
+        try:
+            serialized = self._serialize_path(path)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(serialized, f, indent=2)
+            self.current_path_file = filename
+            self.settings.setValue(self.KEY_LAST_PATH_FILE, filename)
+            return filename
+        except Exception:
+            return None
+
+    def delete_path(self, filename: str) -> bool:
+        """Delete a path file from the paths directory. Returns True if successful."""
+        paths_dir = self.get_paths_dir()
+        if not self.project_dir or not paths_dir:
+            return False
+        filepath = os.path.join(paths_dir, filename)
+        if not os.path.isfile(filepath):
+            return False
+        try:
+            os.remove(filepath)
+            # If this was the current path, clear it
+            if self.current_path_file == filename:
+                self.current_path_file = None
+                self.settings.remove(self.KEY_LAST_PATH_FILE)
+            return True
+        except Exception:
+            return False
+
+    def load_last_or_first_or_create(self) -> Tuple[Path, str]:
+        """Attempt to load last path (from settings). If unavailable, load first available
+        path in directory. If none exist, create 'untitled.json' empty path and return it.
+        Returns (Path, filename).
+        """
+        # Try last used
+        last_file = self.settings.value(self.KEY_LAST_PATH_FILE, type=str)
+        if last_file:
+            p = self.load_path(last_file)
+            if p is not None:
+                return p, last_file
+        # Try first available
+        files = self.list_paths()
+        if files:
+            first = files[0]
+            p = self.load_path(first)
+            if p is not None:
+                return p, first
+        # Create a new empty path
+        new_path = Path()
+        used = self.save_path(new_path, "untitled.json")
+        if used is None:
+            used = "untitled.json"
+        return new_path, used
+
+    # --------------- Serialization helpers ---------------
+    def _serialize_path(self, path: Path) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for elem in path.path_elements:
+            if isinstance(elem, TranslationTarget):
+                d: Dict[str, Any] = {
+                    "type": "translation",
+                    "x_meters": float(elem.x_meters),
+                    "y_meters": float(elem.y_meters),
+                }
+                # Optionals
+                if elem.final_velocity_meters_per_sec is not None:
+                    d["final_velocity_meters_per_sec"] = float(elem.final_velocity_meters_per_sec)
+                if elem.max_velocity_meters_per_sec is not None:
+                    d["max_velocity_meters_per_sec"] = float(elem.max_velocity_meters_per_sec)
+                if elem.max_acceleration_meters_per_sec2 is not None:
+                    d["max_acceleration_meters_per_sec2"] = float(elem.max_acceleration_meters_per_sec2)
+                if elem.intermediate_handoff_radius_meters is not None:
+                    d["intermediate_handoff_radius_meters"] = float(elem.intermediate_handoff_radius_meters)
+                items.append(d)
+            elif isinstance(elem, RotationTarget):
+                d = {
+                    "type": "rotation",
+                    "rotation_radians": float(elem.rotation_radians),
+                    "x_meters": float(elem.x_meters),
+                    "y_meters": float(elem.y_meters),
+                }
+                if elem.max_velocity_rad_per_sec is not None:
+                    d["max_velocity_rad_per_sec"] = float(elem.max_velocity_rad_per_sec)
+                if elem.max_acceleration_rad_per_sec2 is not None:
+                    d["max_acceleration_rad_per_sec2"] = float(elem.max_acceleration_rad_per_sec2)
+                items.append(d)
+            elif isinstance(elem, Waypoint):
+                td = {
+                    "x_meters": float(elem.translation_target.x_meters),
+                    "y_meters": float(elem.translation_target.y_meters),
+                }
+                if elem.translation_target.final_velocity_meters_per_sec is not None:
+                    td["final_velocity_meters_per_sec"] = float(elem.translation_target.final_velocity_meters_per_sec)
+                if elem.translation_target.max_velocity_meters_per_sec is not None:
+                    td["max_velocity_meters_per_sec"] = float(elem.translation_target.max_velocity_meters_per_sec)
+                if elem.translation_target.max_acceleration_meters_per_sec2 is not None:
+                    td["max_acceleration_meters_per_sec2"] = float(elem.translation_target.max_acceleration_meters_per_sec2)
+                if elem.translation_target.intermediate_handoff_radius_meters is not None:
+                    td["intermediate_handoff_radius_meters"] = float(elem.translation_target.intermediate_handoff_radius_meters)
+
+                rd = {
+                    "rotation_radians": float(elem.rotation_target.rotation_radians),
+                    "x_meters": float(elem.rotation_target.x_meters),
+                    "y_meters": float(elem.rotation_target.y_meters),
+                }
+                if elem.rotation_target.max_velocity_rad_per_sec is not None:
+                    rd["max_velocity_rad_per_sec"] = float(elem.rotation_target.max_velocity_rad_per_sec)
+                if elem.rotation_target.max_acceleration_rad_per_sec2 is not None:
+                    rd["max_acceleration_rad_per_sec2"] = float(elem.rotation_target.max_acceleration_rad_per_sec2)
+
+                items.append({
+                    "type": "waypoint",
+                    "translation_target": td,
+                    "rotation_target": rd,
+                })
+            else:
+                # Unknown type – skip
+                continue
+        return items
+
+    def _deserialize_path(self, data: Any) -> Path:
+        path = Path()
+        if not isinstance(data, list):
+            return path
+        for item in data:
+            try:
+                if not isinstance(item, dict):
+                    continue
+                typ = item.get("type")
+                if typ == "translation":
+                    el = TranslationTarget(
+                        x_meters=float(item.get("x_meters", 0.0)),
+                        y_meters=float(item.get("y_meters", 0.0)),
+                        final_velocity_meters_per_sec=self._opt_float(item.get("final_velocity_meters_per_sec")),
+                        max_velocity_meters_per_sec=self._opt_float(item.get("max_velocity_meters_per_sec")),
+                        max_acceleration_meters_per_sec2=self._opt_float(item.get("max_acceleration_meters_per_sec2")),
+                        intermediate_handoff_radius_meters=self._opt_float(item.get("intermediate_handoff_radius_meters")),
+                    )
+                    path.path_elements.append(el)
+                elif typ == "rotation":
+                    el = RotationTarget(
+                        rotation_radians=float(item.get("rotation_radians", 0.0)),
+                        x_meters=float(item.get("x_meters", 0.0)),
+                        y_meters=float(item.get("y_meters", 0.0)),
+                        max_velocity_rad_per_sec=self._opt_float(item.get("max_velocity_rad_per_sec")),
+                        max_acceleration_rad_per_sec2=self._opt_float(item.get("max_acceleration_rad_per_sec2")),
+                    )
+                    path.path_elements.append(el)
+                elif typ == "waypoint":
+                    tt = item.get("translation_target", {}) or {}
+                    rt = item.get("rotation_target", {}) or {}
+                    el = Waypoint(
+                        translation_target=TranslationTarget(
+                            x_meters=float(tt.get("x_meters", 0.0)),
+                            y_meters=float(tt.get("y_meters", 0.0)),
+                            final_velocity_meters_per_sec=self._opt_float(tt.get("final_velocity_meters_per_sec")),
+                            max_velocity_meters_per_sec=self._opt_float(tt.get("max_velocity_meters_per_sec")),
+                            max_acceleration_meters_per_sec2=self._opt_float(tt.get("max_acceleration_meters_per_sec2")),
+                            intermediate_handoff_radius_meters=self._opt_float(tt.get("intermediate_handoff_radius_meters")),
+                        ),
+                        rotation_target=RotationTarget(
+                            rotation_radians=float(rt.get("rotation_radians", 0.0)),
+                            x_meters=float(rt.get("x_meters", 0.0)),
+                            y_meters=float(rt.get("y_meters", 0.0)),
+                            max_velocity_rad_per_sec=self._opt_float(rt.get("max_velocity_rad_per_sec")),
+                            max_acceleration_rad_per_sec2=self._opt_float(rt.get("max_acceleration_rad_per_sec2")),
+                        ),
+                    )
+                    path.path_elements.append(el)
+                else:
+                    continue
+            except Exception:
+                # Skip malformed entries
+                continue
+        return path
+
+    @staticmethod
+    def _opt_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+
+    # --------------- Example content ---------------
+    def _create_example_paths(self, paths_dir: str) -> None:
+        """Populate example config and a couple of path files."""
+        # Overwrite config with example to showcase values
+        try:
+            self.save_config(EXAMPLE_CONFIG.copy())
+        except Exception:
+            pass
+        # Two example paths
+        try:
+            path1 = Path()
+            path1.path_elements.extend([
+                TranslationTarget(x_meters=2.0, y_meters=2.0),
+                RotationTarget(rotation_radians=0.0, x_meters=4.0, y_meters=3.0),
+                Waypoint(
+                    translation_target=TranslationTarget(x_meters=6.0, y_meters=4.0),
+                    rotation_target=RotationTarget(rotation_radians=0.5, x_meters=6.0, y_meters=4.0),
+                ),
+                TranslationTarget(x_meters=10.0, y_meters=6.0),
+            ])
+            with open(os.path.join(paths_dir, "example_a.json"), "w", encoding="utf-8") as f:
+                json.dump(self._serialize_path(path1), f, indent=2)
+        except Exception:
+            pass
+        try:
+            path2 = Path()
+            path2.path_elements.extend([
+                TranslationTarget(x_meters=1.0, y_meters=7.5),
+                TranslationTarget(x_meters=5.0, y_meters=6.0),
+                RotationTarget(rotation_radians=1.2, x_meters=8.0, y_meters=4.0),
+                TranslationTarget(x_meters=12.5, y_meters=3.0),
+            ])
+            with open(os.path.join(paths_dir, "example_b.json"), "w", encoding="utf-8") as f:
+                json.dump(self._serialize_path(path2), f, indent=2)
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
+
+```
+
+### models/path_model.py
+```
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Optional
+from abc import ABC
+
+class PathElement(ABC):
+    pass
+
+@dataclass
+class TranslationTarget(PathElement):
+    x_meters : float = 0
+    y_meters : float = 0
+    final_velocity_meters_per_sec : Optional[float] = None
+    max_velocity_meters_per_sec : Optional[float] = None
+    max_acceleration_meters_per_sec2 : Optional[float] = None
+    intermediate_handoff_radius_meters : Optional[float] = None
+
+@dataclass
+class RotationTarget(PathElement):
+    rotation_radians : float = 0
+    x_meters : float = 0
+    y_meters : float = 0
+    max_velocity_rad_per_sec : Optional[float] = None
+    max_acceleration_rad_per_sec2 : Optional[float] = None
+
+@dataclass
+class Waypoint(PathElement):
+    translation_target : TranslationTarget = field(default_factory=TranslationTarget)
+    rotation_target : RotationTarget = field(default_factory=RotationTarget)
+
+@dataclass
+class Path:
+    path_elements : List[PathElement] = field(default_factory=list)
+
+    def get_element(self, index: int) -> PathElement:
+        if 0 <= index < len(self.path_elements):
+            return self.path_elements[index]
+        raise IndexError("Index out of range")
+
+    def reorder_elements(self, new_order: List[int]):
+        if len(new_order) != len(self.path_elements):
+            raise ValueError("New order must match elements length")
+        self.path_elements = [self.path_elements[i] for i in new_order]
+```
+
+### grok/gather_for_grok_simple.py
+```
+#!/usr/bin/env python3
+"""
+Simplified script to gather FRC-PTP-GUI project files for Grok 4 website prompts.
+This version creates a more concise format that's easier to paste into Grok 4.
+"""
+
+import json
+from pathlib import Path
+
+def read_file_content(file_path):
+    """Read file content and return as string."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+def gather_project_files():
+    """Gather all relevant project files."""
+    project_files = {}
+    project_root = Path(".")
+    
+    # Python files
+    for py_file in project_root.rglob("*.py"):
+        if "__pycache__" not in str(py_file):
+            relative_path = py_file.relative_to(project_root)
+            content = read_file_content(py_file)
+            project_files[f"python:{relative_path}"] = content
+    
+    # Example project files
+    example_dir = Path("example_project")
+    if example_dir.exists():
+        # Config and README
+        for file_name in ["config.json", "README.md"]:
+            file_path = example_dir / file_name
+            if file_path.exists():
+                content = read_file_content(file_path)
+                project_files[f"example:{file_name}"] = content
+        
+        # Path files
+        paths_dir = example_dir / "paths"
+        if paths_dir.exists():
+            for path_file in paths_dir.glob("*.json"):
+                relative_path = path_file.relative_to(example_dir)
+                content = read_file_content(path_file)
+                project_files[f"example:{relative_path}"] = content
+    
+    return project_files
+
+def create_simple_prompt():
+    """Create a simplified prompt for Grok 4 website."""
+    
+    project_files = gather_project_files()
+    
+    prompt = """# FRC-PTP-GUI Project Repository
+
+## Project Description
+This is a Python GUI application for FRC (FIRST Robotics Competition) path planning and trajectory optimization using PySide6.
+
+## Project Structure
+- main.py - Application entry point
+- ui/ - User interface components (main_window.py, sidebar.py, canvas.py, config_dialog.py)
+- models/ - Data models (path_model.py)
+- utils/ - Utilities (project_manager.py)
+- example_project/ - Example configuration and path files
+
+## Repository Contents
+
+"""
+    
+    # Add file contents in a more compact format
+    for file_key, content in project_files.items():
+        file_type, file_path = file_key.split(":", 1)
+        prompt += f"### {file_path}\n"
+        prompt += f"```\n{content}\n```\n\n"
+    
+    return prompt
+
+def main():
+    """Generate and save the simplified prompt."""
+    print("🔍 Creating simplified Grok 4 prompt...")
+    
+    prompt = create_simple_prompt()
+    
+    # Save simplified prompt in /grok directory
+    grok_dir = Path("grok")
+    grok_dir.mkdir(exist_ok=True)
+    
+    try:
+        with open(grok_dir / "grok_simple.txt", 'w', encoding='utf-8') as f:
+            f.write(prompt)
+        print(f"✅ Simplified prompt saved to grok/grok_simple.txt")
+        print(f"📝 Length: {len(prompt)} characters")
+        
+        # Show file sizes for reference
+        project_files = gather_project_files()
+        print(f"📁 Total files gathered: {len(project_files)}")
+        
+        # Create a summary file in /grok directory
+        summary = {
+            "project": "FRC-PTP-GUI",
+            "description": "Python GUI for FRC path planning",
+            "files": list(project_files.keys()),
+            "total_files": len(project_files)
+        }
+        
+        with open(grok_dir / "grok_summary.json", 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+        print("📋 Summary saved to grok/grok_summary.json")
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    main()
+
+```
+
+### config.json
+```
+{
+  "robot_length_meters": 0.58,
+  "robot_width_meters": 0.58,
+  "final_velocity_meters_per_sec": 0.0,
+  "max_velocity_meters_per_sec": 3.0,
+  "max_acceleration_meters_per_sec2": 2.5,
+  "intermediate_handoff_radius_meters": 0.4,
+  "max_velocity_deg_per_sec": 180.0,
+  "max_acceleration_deg_per_sec2": 360.0
+}
+```
+
+### README.md
+```
+# Example FRC Path Project
+
+This is a test project directory for the FRC Path Editor application.
+
+## Structure
+```
+example_project/
+├── config.json              # Robot configuration and default values
+├── paths/                   # Path files directory
+│   ├── simple_path.json     # Basic path with translation, rotation, and waypoint
+│   ├── advanced_path.json   # Complex path with multiple elements
+│   └── empty_path.json      # Empty path for testing
+└── README.md                # This file
+```
+
+## How to Use
+
+1. **Open the FRC Path Editor application**
+2. **Go to Project > Open Project...**
+3. **Navigate to and select this `example_project` directory**
+4. **The application will load the config and available paths**
+
+## Available Paths
+
+### simple_path.json
+- Basic path demonstrating all three element types
+- Translation target with velocity settings
+- Rotation target with angular velocity limits
+- Waypoint combining both translation and rotation
+- Final translation with handoff radius
+
+### advanced_path.json
+- More complex path with multiple waypoints
+- Various optional properties set
+- Different velocity and acceleration values
+- Negative rotation angles
+
+### empty_path.json
+- Empty path for testing path creation
+- Start with this to build your own path from scratch
+
+## Config Values
+
+The `config.json` contains:
+- **Robot dimensions**: 0.70m × 0.62m
+- **Default velocities**: 1.0-3.0 m/s
+- **Default accelerations**: 2.5 m/s²
+- **Default angular velocities**: 180-360 deg/s
+- **Default handoff radius**: 0.4m
+
+## Testing Features
+
+- **Load different paths** using Project > Load Path
+- **Edit config** using Project > Edit Config
+- **Save paths** using Project > Save Path As...
+- **Switch between projects** using Project > Recent Projects
+- **Auto-save** happens automatically on changes
+- **Robot dimensions** update canvas display immediately
+
+## File Format
+
+All paths use the JSON format that mirrors the `path_model.py` structure:
+- `type`: "translation", "rotation", or "waypoint"
+- Element-specific properties (x_meters, y_meters, etc.)
+- Optional properties only included when not None
+
+```
+
+### paths/new simple.json
+```
+[
+  {
+    "type": "translation",
+    "x_meters": 2.0,
+    "y_meters": 2.0
+  },
+  {
+    "type": "rotation",
+    "rotation_radians": 0.785,
+    "x_meters": 4.0,
+    "y_meters": 3.0
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    },
+    "rotation_target": {
+      "rotation_radians": 1.57,
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    }
+  },
+  {
+    "type": "translation",
+    "x_meters": 10.0,
+    "y_meters": 6.0
+  }
+]
+```
+
+### paths/bllll.json
+```
+[
+  {
+    "type": "translation",
+    "x_meters": 2.0,
+    "y_meters": 2.0
+  },
+  {
+    "type": "rotation",
+    "rotation_radians": 0.785,
+    "x_meters": 4.0,
+    "y_meters": 3.0
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    },
+    "rotation_target": {
+      "rotation_radians": 1.57,
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    }
+  },
+  {
+    "type": "translation",
+    "x_meters": 10.0,
+    "y_meters": 6.0
+  }
+]
+```
+
+### paths/simple_path.json
+```
+[
+  {
+    "type": "translation",
+    "x_meters": 2.0,
+    "y_meters": 2.0
+  },
+  {
+    "type": "rotation",
+    "rotation_radians": 0.785,
+    "x_meters": 4.0,
+    "y_meters": 3.0
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    },
+    "rotation_target": {
+      "rotation_radians": 1.57,
+      "x_meters": 6.0,
+      "y_meters": 4.0
+    }
+  },
+  {
+    "type": "translation",
+    "x_meters": 10.0,
+    "y_meters": 6.0
+  }
+]
+```
+
+### paths/sdofij.json
+```
+[]
+```
+
+### paths/our path.json
+```
+[
+  {
+    "type": "translation",
+    "x_meters": 10.4,
+    "y_meters": 3.99
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 8.05,
+      "y_meters": 4.84
+    },
+    "rotation_target": {
+      "rotation_radians": 0.0,
+      "x_meters": 8.05,
+      "y_meters": 4.84
+    }
+  },
+  {
+    "type": "waypoint",
+    "translation_target": {
+      "x_meters": 5.79,
+      "y_meters": 3.22
+    },
+    "rotation_target": {
+      "rotation_radians": 0.0,
+      "x_meters": 5.79,
+      "y_meters": 3.22
+    }
+  }
+]
+```
+
+### paths/untitled.json
+```
+[]
+```
+

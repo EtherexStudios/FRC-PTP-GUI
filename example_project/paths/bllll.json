@@ -6,7 +6,7 @@
   },
   {
     "type": "rotation",
-    "rotation_radians": 0.785,
+    "rotation_radians": 0.7850490975470493,
     "x_meters": 4.0,
     "y_meters": 3.0
   },
@@ -17,7 +17,7 @@
       "y_meters": 4.0
     },
     "rotation_target": {
-      "rotation_radians": 1.57,
+      "rotation_radians": 1.5699236621688994,
       "x_meters": 6.0,
       "y_meters": 4.0
     }

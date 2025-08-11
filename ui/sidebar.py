@@ -272,6 +272,7 @@ class Sidebar(QWidget):
         # For remembering last-open section per element
         self._last_opened_section_by_element = {}
         self.toolbox.currentChanged.connect(self._remember_current_section)
+        
 
         # Store label references for each spinner
         self.spinners = {}
@@ -570,25 +571,14 @@ class Sidebar(QWidget):
         self._set_toolbox_enabled(show_translation, show_rotation)
 
     def _rebuild_toolbox_pages(self, show_translation: bool, show_rotation: bool):
-        # Rebuild toolbox items to exactly match what should be visible
         self.toolbox.blockSignals(True)
         try:
-            current_text = self.toolbox.itemText(self.toolbox.currentIndex()) if self.toolbox.count() > 0 else None
-            while self.toolbox.count() > 0:
-                self.toolbox.removeItem(0)
-            self.toolbox.addItem(self.core_page, "Core")
-            if show_translation:
-                self.toolbox.addItem(self.translation_limits_page, "Translation Limits")
-            if show_rotation:
-                self.toolbox.addItem(self.rotation_limits_page, "Rotation Limits")
-            # Restore previous tab if possible
-            if current_text is not None:
-                for i in range(self.toolbox.count()):
-                    if self.toolbox.itemText(i) == current_text:
-                        self.toolbox.setCurrentIndex(i)
-                        break
-            # Ensure a valid tab is selected
-            if self.toolbox.currentIndex() < 0 and self.toolbox.count() > 0:
+            self.toolbox.setItemEnabled(1, show_translation)  # Index 1: Translation Limits
+            self.translation_limits_page.setVisible(show_translation)
+            self.toolbox.setItemEnabled(2, show_rotation)  # Index 2: Rotation Limits
+            self.rotation_limits_page.setVisible(show_rotation)
+            # Restore or default to Core if others hidden
+            if self.toolbox.currentIndex() > 0 and not self.toolbox.widget(self.toolbox.currentIndex()).isVisible():
                 self.toolbox.setCurrentIndex(0)
         finally:
             self.toolbox.blockSignals(False)
