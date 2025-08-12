@@ -407,6 +407,10 @@ class ProjectManager:
     def _opt_float(value: Any) -> Optional[float]:
         if value is None:
             return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     # --------------- Example content ---------------
     def _create_example_paths(self, paths_dir: str) -> None:
@@ -444,9 +448,5 @@ class ProjectManager:
                 json.dump(self._serialize_path(path2), f, indent=2)
         except Exception:
             pass
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
 
 

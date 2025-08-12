@@ -453,7 +453,7 @@ class Sidebar(QWidget):
                     else:
                         display = Sidebar._label(deg_name)
                         optional_display_items.append(display)
-                        self.optional_display_to_key[deg_name] = name
+                        self.optional_display_to_key[display] = deg_name
             return False
 
         # Decide which owners contribute which fields
@@ -474,9 +474,17 @@ class Sidebar(QWidget):
             for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
                 if show_attr(element.translation_target, name):
                     has_translation_limits = True
+                else:
+                    display = Sidebar._label(name)
+                    optional_display_items.append(display)
+                    self.optional_display_to_key[display] = name
             for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
                 if show_deg_attr(element.rotation_target, name):
                     has_rotation_limits = True
+                else:
+                    display = Sidebar._label(name)
+                    optional_display_items.append(display)
+                    self.optional_display_to_key[display] = name
         elif isinstance(element, TranslationTarget):
             show_attr(element, 'x_meters')
             show_attr(element, 'y_meters')
@@ -494,6 +502,10 @@ class Sidebar(QWidget):
             for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
                 if show_deg_attr(element, name):
                     has_rotation_limits = True
+                else:
+                    display = Sidebar._label(name)
+                    optional_display_items.append(display)
+                    self.optional_display_to_key[display] = name
 
         # Populate the optional dropdown sorted
         if optional_display_items:
