@@ -159,6 +159,8 @@ class Sidebar(QWidget):
         # Re-entrancy/visibility guards
         self._suspended: bool = False
         self._ready: bool = False
+        # Track last selected index for restoration when paths are reloaded
+        self._last_selected_index: int = 0
         
         self.points_list = CustomList()
         main_layout.addWidget(self.points_list)
@@ -451,7 +453,7 @@ class Sidebar(QWidget):
                     else:
                         display = Sidebar._label(deg_name)
                         optional_display_items.append(display)
-                        self.optional_display_to_key[display] = deg_name
+                        self.optional_display_to_key[deg_name] = name
             return False
 
         # Decide which owners contribute which fields
@@ -634,6 +636,9 @@ class Sidebar(QWidget):
             if idx is None or self.path is None:
                 self.hide_spinners()
                 return
+            
+            # Store the selected index for restoration when paths are reloaded
+            self._last_selected_index = idx
             
             # Validate index bounds
             if idx < 0 or idx >= len(self.path.path_elements):
@@ -1050,6 +1055,22 @@ class Sidebar(QWidget):
         # Pre-check: ensure rotation elements are projected between neighbors
         self._reproject_all_rotation_positions()
         self.rebuild_points_list()
+        
+        # Restore UI state if there are elements and one was previously selected
+        if self.path and self.path.path_elements:
+            # Try to restore the last selected index, or select the first element
+            last_selected = getattr(self, '_last_selected_index', 0)
+            if last_selected < len(self.path.path_elements):
+                self.select_index(last_selected)
+                # Force refresh the selection to restore optional spinners
+                QTimer.singleShot(0, self.refresh_current_selection)
+            else:
+                self.select_index(0)
+                QTimer.singleShot(0, self.refresh_current_selection)
+        else:
+            # Clear the UI if no path or no elements
+            self.hide_spinners()
+        
         # No signal here; caller coordinates initial sync
         
     def on_points_list_reordered(self):
