@@ -4,7 +4,7 @@
   "final_velocity_meters_per_sec": 0.0,
   "max_velocity_meters_per_sec": 3.0,
   "max_acceleration_meters_per_sec2": 2.5,
-  "intermediate_handoff_radius_meters": 0.4,
+  "intermediate_handoff_radius_meters": 1.0,
   "max_velocity_deg_per_sec": 180.0,
   "max_acceleration_deg_per_sec2": 360.0
 }

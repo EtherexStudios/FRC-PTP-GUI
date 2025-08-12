@@ -31,6 +31,8 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         # Provide project manager to sidebar for config defaults
         self.sidebar.project_manager = self.project_manager
+        # Provide project manager to canvas for config defaults
+        self.canvas.set_project_manager(self.project_manager)
         self.sidebar.set_path(self.path)
         layout.addWidget(self.sidebar, stretch=1)  # Narrower
 
@@ -43,6 +45,7 @@ class MainWindow(QMainWindow):
 
         # Sidebar changes -> canvas refresh
         self.sidebar.modelChanged.connect(self.canvas.refresh_from_model)
+        self.sidebar.modelChanged.connect(self.canvas.update_handoff_radius_visualizers)
         self.sidebar.modelStructureChanged.connect(lambda: self.canvas.set_path(self.path))
 
         # Canvas interactions -> update model and sidebar

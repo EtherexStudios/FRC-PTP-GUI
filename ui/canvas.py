@@ -25,6 +25,9 @@ HANDLE_LINK_THICKNESS_M = 0.03
 HANDLE_RADIUS_M = 0.12
 HANDLE_DISTANCE_M = 0.70
 OUTLINE_EDGE_PEN = QPen(QColor("#222222"), 0.02)
+# Handoff radius visualizer constants
+HANDOFF_RADIUS_PEN = QPen(QColor("#FF00FF"), 0.03)  # Magenta with medium thickness
+HANDOFF_RADIUS_PEN.setStyle(Qt.DotLine)  # Dotted line style
 
 
 class CircleElementItem(QGraphicsEllipseItem):
@@ -170,10 +173,13 @@ class RectElementItem(QGraphicsRectItem):
         if dashed_outline:
             pen.setStyle(Qt.DashLine)
         self.setPen(pen)
-        if filled_color is not None:
+        
+        # For waypoints, don't fill - just show borders
+        if filled_color is not None and not isinstance(self.canvas_view._path.path_elements[index_in_model], Waypoint):
             self.setBrush(QBrush(filled_color))
         else:
             self.setBrush(Qt.NoBrush)
+            
         # Interactivity flags
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
@@ -202,8 +208,16 @@ class RectElementItem(QGraphicsRectItem):
         ]
         polygon = QPolygonF(points)
         self.triangle_item.setPolygon(polygon)
-        self.triangle_item.setBrush(QBrush(color))
-        self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+        
+        # For waypoints, only show outline, no fill
+        if isinstance(self.canvas_view._path.path_elements[self.index_in_model], Waypoint):
+            self.triangle_item.setBrush(Qt.NoBrush)
+            # Use the passed color for the outline with thicker line to match box outline
+            self.triangle_item.setPen(QPen(color, OUTLINE_THICK_M))
+        else:
+            self.triangle_item.setBrush(QBrush(color))
+            self.triangle_item.setPen(OUTLINE_EDGE_PEN)
+            
         self.triangle_item.setZValue(self.zValue() + 1)
 
     def set_center(self, center_m: QPointF):
@@ -362,6 +376,40 @@ class RotationHandle(QGraphicsEllipseItem):
         super().mouseReleaseEvent(event)
 
 
+class HandoffRadiusVisualizer(QGraphicsEllipseItem):
+    """Visualizes the handoff radius for translation and waypoint elements"""
+    
+    def __init__(self, canvas_view: 'CanvasView', center_m: QPointF, radius_m: float):
+        super().__init__()
+        self.canvas_view = canvas_view
+        self.radius_m = radius_m
+        
+        # Set the circle to be centered at origin with diameter = 2 * radius
+        self.setRect(QRectF(-radius_m, -radius_m, radius_m * 2, radius_m * 2))
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+        
+        # Set the pen to dotted magenta
+        self.setPen(HANDOFF_RADIUS_PEN)
+        self.setBrush(Qt.NoBrush)  # No fill, just outline
+        
+        # Set higher z-value so it appears over all other elements
+        self.setZValue(20)
+        
+        # Not interactive
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        
+    
+    def set_center(self, center_m: QPointF):
+        """Update the center position of the handoff radius circle"""
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
+    
+    def set_radius(self, radius_m: float):
+        """Update the radius of the handoff radius circle"""
+        self.radius_m = radius_m
+        self.setRect(QRectF(-radius_m, -radius_m, radius_m * 2, radius_m * 2))
+
+
 class CanvasView(QGraphicsView):
     # Emitted when the user selects an element on the canvas
     elementSelected = Signal(int)  # index
@@ -398,6 +446,8 @@ class CanvasView(QGraphicsView):
         self._path: Optional[Path] = None
         self._items: List[Tuple[str, RectElementItem, Optional[RotationHandle]]] = []
         self._connect_lines: List[QGraphicsLineItem] = []
+        # Store handoff radius visualizers
+        self._handoff_visualizers: List[Optional[HandoffRadiusVisualizer]] = []
 
         self._load_field_background("assets/field25.png")
 
@@ -434,6 +484,65 @@ class CanvasView(QGraphicsView):
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
 
+    def set_project_manager(self, project_manager):
+        """Set the project manager reference to access default config values"""
+        self._project_manager = project_manager
+
+    def update_handoff_radius_visualizers(self):
+        """Update handoff radius visualizers based on current model state"""
+        if self._path is None or not self._items:
+            return
+            
+        for i, (kind, item, handle) in enumerate(self._items):
+            if i >= len(self._handoff_visualizers):
+                continue
+                
+            element = self._path.path_elements[i]
+            pos = self._element_position(element)
+            
+            # Skip rotation elements - they never get handoff radius visualizers
+            if kind == 'rotation':
+                # Remove any existing visualizer for rotation elements
+                if self._handoff_visualizers[i] is not None:
+                    self.graphics_scene.removeItem(self._handoff_visualizers[i])
+                    self._handoff_visualizers[i].deleteLater()
+                    self._handoff_visualizers[i] = None
+                continue
+            
+            # Determine if we need a handoff radius visualizer
+            radius = None
+            if isinstance(element, TranslationTarget):
+                radius = getattr(element, 'intermediate_handoff_radius_meters', None)
+            elif isinstance(element, Waypoint):
+                radius = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
+            
+            # If no radius set, try to get default from config
+            if radius is None or radius <= 0:
+                try:
+                    if hasattr(self, '_project_manager') and self._project_manager is not None:
+                        default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
+                        if default_radius is not None and default_radius > 0:
+                            radius = default_radius
+                except:
+                    pass
+            
+            current_visualizer = self._handoff_visualizers[i]
+            
+            # If we need a visualizer but don't have one, create it
+            if radius is not None and radius > 0 and current_visualizer is None:
+                new_visualizer = HandoffRadiusVisualizer(self, QPointF(pos[0], pos[1]), radius)
+                self.graphics_scene.addItem(new_visualizer)
+                self._handoff_visualizers[i] = new_visualizer
+            # If we have a visualizer but don't need one, remove it
+            elif (radius is None or radius <= 0) and current_visualizer is not None:
+                self.graphics_scene.removeItem(current_visualizer)
+                current_visualizer.deleteLater()
+                self._handoff_visualizers[i] = None
+            # If we have a visualizer and need one, update it
+            elif radius is not None and radius > 0 and current_visualizer is not None:
+                current_visualizer.set_center(QPointF(pos[0], pos[1]))
+                current_visualizer.set_radius(radius)
+
     def refresh_from_model(self):
         # Update item positions and angles from model without rebuilding structure
         if self._path is None or not self._items:
@@ -455,6 +564,32 @@ class CanvasView(QGraphicsView):
                     element = self._path.path_elements[i]
                     pos = self._element_position(element)
                     item.set_center(QPointF(pos[0], pos[1]))
+                    
+                    # Update handoff radius visualizer if it exists
+                    if i < len(self._handoff_visualizers) and self._handoff_visualizers[i] is not None:
+                        visualizer = self._handoff_visualizers[i]
+                        visualizer.set_center(QPointF(pos[0], pos[1]))
+                        
+                        # Update radius if it changed
+                        radius = None
+                        if isinstance(element, TranslationTarget):
+                            radius = getattr(element, 'intermediate_handoff_radius_meters', None)
+                        elif isinstance(element, Waypoint):
+                            radius = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
+                        
+                        # If no radius set, try to get default from config
+                        if radius is None or radius <= 0:
+                            try:
+                                if hasattr(self, '_project_manager') and self._project_manager is not None:
+                                    default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
+                                    if default_radius is not None and default_radius > 0:
+                                        radius = default_radius
+                            except:
+                                pass
+                        
+                        if radius is not None and radius > 0:
+                            visualizer.set_radius(radius)
+                    
                     # Set rotation for waypoint/rotation; translation uses previous orientation source
                     if kind in ("rotation", "waypoint"):
                         angle = self._element_rotation(element)
@@ -590,8 +725,13 @@ class CanvasView(QGraphicsView):
                     self.graphics_scene.removeItem(sub)
         for line in self._connect_lines:
             self.graphics_scene.removeItem(line)
+        # Remove handoff radius visualizers
+        for visualizer in self._handoff_visualizers:
+            if visualizer is not None:
+                self.graphics_scene.removeItem(visualizer)
         self._items.clear()
         self._connect_lines.clear()
+        self._handoff_visualizers.clear()
 
     def _rebuild_items(self):
         self._clear_scene_items()
@@ -615,6 +755,28 @@ class CanvasView(QGraphicsView):
                 )
                 rotation_handle = None
                 item.set_angle_radians(self._angle_for_translation_index(i))
+                
+                # Add handoff radius visualizer if radius is set or use default from config
+                handoff_visualizer = None
+                radius = getattr(element, 'intermediate_handoff_radius_meters', None)
+                if radius is None or radius <= 0:
+                    # Try to get default from project manager if available
+                    try:
+                        if hasattr(self, '_project_manager') and self._project_manager is not None:
+                            default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
+                            if default_radius is not None and default_radius > 0:
+                                radius = default_radius
+                    except:
+                        pass
+                
+                if radius is not None and radius > 0:
+                    handoff_visualizer = HandoffRadiusVisualizer(
+                        self, 
+                        QPointF(pos[0], pos[1]), 
+                        radius
+                    )
+                    self.graphics_scene.addItem(handoff_visualizer)
+                
             elif isinstance(element, RotationTarget):
                 kind = "rotation"
                 item = RectElementItem(
@@ -631,22 +793,48 @@ class CanvasView(QGraphicsView):
                 # Ensure rotation handle is properly synchronized
                 rotation_handle.set_angle(self._element_rotation(element))
                 rotation_handle.sync_to_angle()
+                
+                # No handoff radius for rotation elements
+                handoff_visualizer = None
+                
             elif isinstance(element, Waypoint):
                 kind = "waypoint"
                 item = RectElementItem(
                     self,
                     QPointF(pos[0], pos[1]),
                     i,
-                    filled_color=QColor("#ff7f3a"),
+                    filled_color=None,  # No fill for waypoints
                     outline_color=QColor("#ff7f3a"),
                     dashed_outline=False,
-                    triangle_color=QColor("#000000"),
+                    triangle_color=QColor("#ff7f3a"),
                 )
                 rotation_handle = RotationHandle(self, item, handle_distance_m=HANDLE_DISTANCE_M, handle_radius_m=HANDLE_RADIUS_M, color=QColor("#ff7f3a"))
                 # Initialize rotation from waypoint's rotation target
                 item.set_angle_radians(self._element_rotation(element))
                 rotation_handle.set_angle(self._element_rotation(element))
                 rotation_handle.sync_to_angle()
+                
+                # Add handoff radius visualizer if radius is set on translation target or use default from config
+                handoff_visualizer = None
+                radius = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
+                if radius is None or radius <= 0:
+                    # Try to get default from project manager if available
+                    try:
+                        if hasattr(self, '_project_manager') and self._project_manager is not None:
+                            default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
+                            if default_radius is not None and default_radius > 0:
+                                radius = default_radius
+                    except:
+                        pass
+                
+                if radius is not None and radius > 0:
+                    handoff_visualizer = HandoffRadiusVisualizer(
+                        self, 
+                        QPointF(pos[0], pos[1]), 
+                        radius
+                    )
+                    self.graphics_scene.addItem(handoff_visualizer)
+                
             else:
                 # Unknown, skip
                 continue
@@ -665,6 +853,7 @@ class CanvasView(QGraphicsView):
                         continue
 
             self._items.append((kind, item, rotation_handle))
+            self._handoff_visualizers.append(handoff_visualizer)
 
         # Build connecting lines in hierarchical order
         self._build_connecting_lines()
@@ -750,6 +939,13 @@ class CanvasView(QGraphicsView):
                 handle.sync_to_angle()
         except (IndexError, TypeError):
             return
+            
+        # Update handoff radius visualizer position
+        if index < len(self._handoff_visualizers) and self._handoff_visualizers[index] is not None:
+            try:
+                self._handoff_visualizers[index].set_center(QPointF(x_m, y_m))
+            except (AttributeError, TypeError):
+                pass
             
         # Emit move for the item being dragged first so model updates promptly
         self.elementMoved.emit(index, x_m, y_m)
