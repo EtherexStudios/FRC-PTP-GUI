@@ -6,7 +6,7 @@ from PySide6.QtCore import Signal, QPoint, QSize, QTimer
 from enum import Enum
 from typing import Optional, Tuple
 import math
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QGuiApplication
 from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from typing import Any
 
@@ -55,7 +55,47 @@ class PopupCombobox(QWidget):
         layout.addWidget(self.button)
         
     def show_menu(self):
-        self.menu.popup(self.button.mapToGlobal(QPoint(0, self.button.height())))
+        # Reset any previous size caps
+        try:
+            self.menu.setMinimumHeight(0)
+            self.menu.setMaximumHeight(16777215)  # effectively unlimited
+        except Exception:
+            pass
+
+        # Compute available space below the button on the current screen
+        global_below = self.button.mapToGlobal(QPoint(0, self.button.height()))
+        screen = QGuiApplication.screenAt(global_below)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        avail_geom = screen.availableGeometry() if screen else None
+
+        # Desired size based on current actions
+        desired = self.menu.sizeHint()
+        desired_width = max(desired.width(), self.button.width())
+        desired_height = desired.height()
+
+        # Space below the button (expand downward when possible)
+        if avail_geom is not None:
+            space_below = int(avail_geom.bottom() - global_below.y() - 8)  # small margin
+            if desired_height <= space_below:
+                try:
+                    self.menu.setFixedHeight(desired_height)
+                except Exception:
+                    pass
+            else:
+                # Cap to available space below; menu will auto-provide scroll arrows if needed
+                try:
+                    self.menu.setMaximumHeight(max(100, space_below))
+                except Exception:
+                    pass
+
+        # Ensure the menu is at least as wide as the button
+        try:
+            self.menu.setMinimumWidth(int(desired_width))
+        except Exception:
+            pass
+
+        self.menu.popup(global_below)
 
     def add_items(self, items):
         self.menu.clear()
@@ -93,12 +133,14 @@ class Sidebar(QWidget):
         'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
         'x_meters': {'label': 'X (m)', 'step': 0.05, 'range': (0.0, float(FIELD_LENGTH_METERS)), 'removable': False, 'section': 'core'},
         'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0.0, float(FIELD_WIDTH_METERS)), 'removable': False, 'section': 'core'},
-        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
-        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'translation_limits'},
-        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'translation_limits'},
-        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': True, 'section': 'translation_limits'}, 
-        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'rotation_limits'},
-        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'rotation_limits'}
+        # Handoff radius is a core control for TranslationTarget and Waypoint
+        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': False, 'section': 'core'}, 
+        # Constraints (optional)
+        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
+        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
+        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'constraints'},
+        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'constraints'},
+        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'constraints'}
     }        
 
     # Map UI spinner keys to model attribute names (for rotation fields in degrees)
@@ -134,6 +176,7 @@ class Sidebar(QWidget):
         super().__init__()
         main_layout = QVBoxLayout(self)
         self.setMinimumWidth(300) # Set a minimum width for the sidebar
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         # Top section for the list label and add button in horizontal layout
         top_section = QWidget()
@@ -172,9 +215,9 @@ class Sidebar(QWidget):
         self.title_bar.setObjectName("titleBar")
         self.title_bar.setStyleSheet("""
             QWidget#titleBar {
-                background-color: #404040; /* A more distinct grey */
-                border: 1px solid #666666;
-                border-radius: 5px;
+                background-color: #2f2f2f;
+                border: 1px solid #4a4a4a;
+                border-radius: 6px;
             }
         """)
         title_bar_layout = QHBoxLayout(self.title_bar)
@@ -185,91 +228,70 @@ class Sidebar(QWidget):
         title_label.setStyleSheet("""
             font-size: 14px; 
             font-weight: bold;
+            color: #eeeeee;
             background: transparent;
             border: none;
-            padding: 4px 0;
+            padding: 6px 0;
         """)
         title_bar_layout.addWidget(title_label)
         
         title_bar_layout.addStretch()
         
         self.optional_pop = PopupCombobox()
-        self.optional_pop.setText("Add property")
+        self.optional_pop.setText("Add constraint")
+        self.optional_pop.setToolTip("Add an optional constraint")
+        self.optional_pop.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         title_bar_layout.addWidget(self.optional_pop)
         
         main_layout.addWidget(self.title_bar)
         
         # Form section for editable properties
         self.form_container = QGroupBox()
+        self.form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.form_container.setStyleSheet("""
-            QGroupBox {
-                background-color: #404040; /* A more distinct grey */
-                border: 1px solid #666666;
-                border-radius: 5px;
-            }
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+            QLabel { color: #f0f0f0; }
         """)
         
         # Main layout for the group box
         group_box_spinner_layout = QVBoxLayout(self.form_container)
         group_box_spinner_layout.setContentsMargins(6, 6, 6, 6)
+        group_box_spinner_layout.setSpacing(8)
 
         # Collapsible sections using QToolBox
         self.toolbox = QToolBox()
         self.toolbox.setObjectName("propertiesToolbox")
         self.toolbox.setStyleSheet(
             """
-            QToolBox {
-                background: transparent;
-            }
+            QToolBox { background: transparent; }
             QToolBox::tab {
-                font-weight: 600;
-                padding: 6px 8px;
-                background: #3a3a3a;
-                color: #f0f0f0;
-                border: 0px;
-                border-bottom: 1px solid #ffffff; /* divider under every tab */
+                font-weight: 600; padding: 6px 8px; background: #303030;
+                color: #eaeaea; border: 1px solid #444; border-bottom: none;
+                border-top-left-radius: 4px; border-top-right-radius: 4px; margin-left: 6px;
             }
-            QToolBox::tab:selected {
-                background: #4a4a4a;
-                color: #ffffff;
-                border-bottom: 1px solid #ffffff; /* keep divider when expanded */
-            }
-            QToolBox::tab:!selected {
-                background: #3a3a3a;
-                color: #dddddd;
-                border-bottom: 1px solid #ffffff;
-            }
-            /* Ensure a visible white divider between the selected tab and its page */
-            QToolBox > QWidget {
-                background: #404040;
-                border-top: 1px solid #ffffff;
-            }
+            QToolBox::tab:selected { background: #3a3a3a; color: #ffffff; }
+            QToolBox::tab:hover { background: #363636; }
+            QToolBox > QWidget { background: #2a2a2a; border: 1px solid #444; }
             """
         )
 
         # Core section (always available): x/y and rotation (if applicable)
         self.core_page = QWidget()
+        self.core_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.core_layout = QFormLayout(self.core_page)
         self.core_layout.setLabelAlignment(Qt.AlignRight)
-        self.core_layout.setVerticalSpacing(6)
+        self.core_layout.setVerticalSpacing(8)
         self.core_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.toolbox.addItem(self.core_page, "Core")
 
-        # Translation Limits section (optional fields)
-        self.translation_limits_page = QWidget()
-        self.translation_limits_layout = QFormLayout(self.translation_limits_page)
-        self.translation_limits_layout.setLabelAlignment(Qt.AlignRight)
-        self.translation_limits_layout.setVerticalSpacing(6)
-        self.translation_limits_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.toolbox.addItem(self.translation_limits_page, "Translation Limits")
-
-        # Rotation Limits section (optional fields)
-        self.rotation_limits_page = QWidget()
-        self.rotation_limits_layout = QFormLayout(self.rotation_limits_page)
-        self.rotation_limits_layout.setLabelAlignment(Qt.AlignRight)
-        self.rotation_limits_layout.setVerticalSpacing(6)
-        self.rotation_limits_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.toolbox.addItem(self.rotation_limits_page, "Rotation Limits")
+        # Constraints section (combined optional fields)
+        self.constraints_page = QWidget()
+        self.constraints_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.constraints_layout = QFormLayout(self.constraints_page)
+        self.constraints_layout.setLabelAlignment(Qt.AlignRight)
+        self.constraints_layout.setVerticalSpacing(8)
+        self.constraints_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.toolbox.addItem(self.constraints_page, "Constraints")
 
         # For remembering last-open section per element
         self._last_opened_section_by_element = {}
@@ -304,12 +326,14 @@ class Sidebar(QWidget):
             spin.setSingleStep(data['step'])
             spin.setRange(*data['range'])
             spin.setValue(0)
-            spin.setMinimumWidth(72) # Wider for readability
-            spin.setMaximumWidth(90)
+            spin.setMinimumWidth(96) # Wider for readability
+            spin.setMaximumWidth(200) # Allow expansion when sidebar is wider
+            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             label = QLabel(data['label'])
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             label.setToolTip(data['label'])
+            label.setMinimumWidth(120) # Ensure labels have reasonable minimum width
 
             # Add button next to spinner
             spin_row = QWidget()
@@ -335,6 +359,8 @@ class Sidebar(QWidget):
             spin_row_layout.addStretch() # Push widgets to the right
             spin_row_layout.addWidget(spin)
             spin_row_layout.addWidget(btn)
+            # Make the spin row expand to fill available width
+            spin_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
             # FIX: capture 'name' as a default argument in the lambda
             spin.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
@@ -343,15 +369,17 @@ class Sidebar(QWidget):
             section = data.get('section', 'core')
             if section == 'core':
                 self.core_layout.addRow(label, spin_row)
-            elif section == 'translation_limits':
-                self.translation_limits_layout.addRow(label, spin_row)
-            elif section == 'rotation_limits':
-                self.rotation_limits_layout.addRow(label, spin_row)
+            elif section == 'constraints':
+                self.constraints_layout.addRow(label, spin_row)
             else:
                 self.core_layout.addRow(label, spin_row)
             self.spinners[name] = (spin, label, btn, spin_row)
 
         group_box_spinner_layout.addWidget(self.toolbox)
+        # Make toolbox expand to fill available space
+        self.toolbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Stretch to consume remaining vertical space
+        group_box_spinner_layout.addStretch(1)
         # Subtle padding around the form
         self.form_container.setContentsMargins(6, 6, 6, 6)
 
@@ -457,8 +485,7 @@ class Sidebar(QWidget):
             return False
 
         # Decide which owners contribute which fields
-        has_translation_limits = False
-        has_rotation_limits = False
+        has_constraints = False
         # First hide all rows; we'll only show those that are present/selected
         for name, (spin, label, btn, spin_row) in self.spinners.items():
             label.setVisible(False)
@@ -470,17 +497,28 @@ class Sidebar(QWidget):
             show_attr(element.translation_target, 'y_meters')
             # Rotation degrees from rotation_target
             show_deg_attr(element.rotation_target, 'rotation_degrees')
-            # Limits
-            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
+            # Core handoff radius (force-visible for Waypoints)
+            if 'intermediate_handoff_radius_meters' in self.spinners:
+                spin, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
+                val = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
+                try:
+                    spin.blockSignals(True)
+                    spin.setValue(float(val) if val is not None else 0.0)
+                finally:
+                    spin.blockSignals(False)
+                label.setVisible(True)
+                spin_row.setVisible(True)
+            # Constraints
+            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
                 if show_attr(element.translation_target, name):
-                    has_translation_limits = True
+                    has_constraints = True
                 else:
                     display = Sidebar._label(name)
                     optional_display_items.append(display)
                     self.optional_display_to_key[display] = name
             for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
                 if show_deg_attr(element.rotation_target, name):
-                    has_rotation_limits = True
+                    has_constraints = True
                 else:
                     display = Sidebar._label(name)
                     optional_display_items.append(display)
@@ -488,9 +526,21 @@ class Sidebar(QWidget):
         elif isinstance(element, TranslationTarget):
             show_attr(element, 'x_meters')
             show_attr(element, 'y_meters')
-            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'intermediate_handoff_radius_meters']:
+            # Core handoff radius for TranslationTarget
+            if 'intermediate_handoff_radius_meters' in self.spinners:
+                spin, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
+                val = getattr(element, 'intermediate_handoff_radius_meters', None)
+                try:
+                    spin.blockSignals(True)
+                    spin.setValue(float(val) if val is not None else 0.0)
+                finally:
+                    spin.blockSignals(False)
+                label.setVisible(True)
+                spin_row.setVisible(True)
+            # Constraints
+            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
                 if show_attr(element, name):
-                    has_translation_limits = True
+                    has_constraints = True
                 else:
                     display = Sidebar._label(name)
                     optional_display_items.append(display)
@@ -501,7 +551,7 @@ class Sidebar(QWidget):
             show_deg_attr(element, 'rotation_degrees')
             for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
                 if show_deg_attr(element, name):
-                    has_rotation_limits = True
+                    has_constraints = True
                 else:
                     display = Sidebar._label(name)
                     optional_display_items.append(display)
@@ -514,8 +564,8 @@ class Sidebar(QWidget):
         else:
             self.optional_pop.clear()
 
-        # Rebuild tabs to reflect which sections actually have content
-        self._rebuild_toolbox_pages(has_translation_limits, has_rotation_limits)
+        # Rebuild tabs to reflect whether constraints have any content
+        self._rebuild_toolbox_pages(has_constraints)
         QTimer.singleShot(0, lambda e=element: self._restore_last_opened_section(e))
 
         # Rotation already first in Core via metadata order; no row surgery required
@@ -547,9 +597,15 @@ class Sidebar(QWidget):
             # rotation degrees
             if element.rotation_target.rotation_radians is not None:
                 set_spin_value('rotation_degrees', math.degrees(element.rotation_target.rotation_radians))
+            # core handoff radius
+            if hasattr(element.translation_target, 'intermediate_handoff_radius_meters') and element.translation_target.intermediate_handoff_radius_meters is not None:
+                set_spin_value('intermediate_handoff_radius_meters', float(element.translation_target.intermediate_handoff_radius_meters))
         elif isinstance(element, TranslationTarget):
             set_spin_value('x_meters', element.x_meters)
             set_spin_value('y_meters', element.y_meters)
+            # core handoff radius
+            if hasattr(element, 'intermediate_handoff_radius_meters') and element.intermediate_handoff_radius_meters is not None:
+                set_spin_value('intermediate_handoff_radius_meters', float(element.intermediate_handoff_radius_meters))
         elif isinstance(element, RotationTarget):
             set_spin_value('x_meters', element.x_meters)
             set_spin_value('y_meters', element.y_meters)
@@ -570,7 +626,7 @@ class Sidebar(QWidget):
                     spin.blockSignals(False)
 
     def _refresh_toolbox_sections(self, element):
-        # Determine if translation/rotation limits have any visible rows
+        # Determine if constraints section has any visible rows
         def layout_has_visible_rows(layout: QFormLayout) -> bool:
             for i in range(layout.rowCount()):
                 field_item = layout.itemAt(i, QFormLayout.FieldRole)
@@ -580,30 +636,25 @@ class Sidebar(QWidget):
                         return True
             return False
 
-        show_translation = layout_has_visible_rows(self.translation_limits_layout)
-        show_rotation = layout_has_visible_rows(self.rotation_limits_layout)
-        self._set_toolbox_enabled(show_translation, show_rotation)
+        show_constraints = layout_has_visible_rows(self.constraints_layout)
+        self._set_toolbox_enabled(show_constraints)
 
-    def _rebuild_toolbox_pages(self, show_translation: bool, show_rotation: bool):
+    def _rebuild_toolbox_pages(self, show_constraints: bool):
         self.toolbox.blockSignals(True)
         try:
-            self.toolbox.setItemEnabled(1, show_translation)  # Index 1: Translation Limits
-            self.translation_limits_page.setVisible(show_translation)
-            self.toolbox.setItemEnabled(2, show_rotation)  # Index 2: Rotation Limits
-            self.rotation_limits_page.setVisible(show_rotation)
-            # Restore or default to Core if others hidden
+            self.toolbox.setItemEnabled(1, show_constraints)  # Index 1: Constraints
+            self.constraints_page.setVisible(show_constraints)
             if self.toolbox.currentIndex() > 0 and not self.toolbox.widget(self.toolbox.currentIndex()).isVisible():
                 self.toolbox.setCurrentIndex(0)
         finally:
             self.toolbox.blockSignals(False)
 
-    def _set_toolbox_enabled(self, show_translation: bool, show_rotation: bool):
+    def _set_toolbox_enabled(self, show_constraints: bool):
         # Show/hide pages without removing them to avoid deleting widgets
         self.toolbox.blockSignals(True)
         try:
             self.core_page.setVisible(True)
-            self.translation_limits_page.setVisible(bool(show_translation))
-            self.rotation_limits_page.setVisible(bool(show_rotation))
+            self.constraints_page.setVisible(bool(show_constraints))
             # If current page hidden, jump to Core
             cur = self.toolbox.currentIndex()
             current_widget = self.toolbox.widget(cur) if cur >= 0 else None
@@ -785,7 +836,16 @@ class Sidebar(QWidget):
             elif hasattr(element, real_key):
                 setattr(element, real_key, base_val)
         # Defer UI refresh to allow QMenu to close cleanly, then rebuild dropdown
-        QTimer.singleShot(0, lambda e=element: self.expose_element(e))
+        def _refresh_and_focus_constraints(e=element):
+            try:
+                self.expose_element(e)
+                # Auto-expand the Constraints section if it's available
+                # Index 1 is Constraints
+                if hasattr(self, 'constraints_page'):
+                    self.toolbox.setCurrentIndex(1)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _refresh_and_focus_constraints)
         self.modelChanged.emit()
 
 
