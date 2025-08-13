@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QToolBox
+from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QMessageBox
 from PySide6.QtWidgets import QListWidget, QListWidgetItem 
 from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
 from PySide6.QtCore import Qt
@@ -45,7 +45,7 @@ class PopupCombobox(QWidget):
         self.button.setIcon(QIcon("assets/add_icon.png"))
         self.button.setIconSize(QSize(16,16))
         self.button.setToolTip("Add an optional property")
-        self.button.setStyleSheet("QPushButton { border: none; padding: 2px 6px; }")
+        self.button.setStyleSheet("QPushButton { border: none; padding: 2px 6px; margin-left: 8px; }")
         self.button.setMinimumHeight(22)
 
         self.menu = QMenu(self)
@@ -55,6 +55,11 @@ class PopupCombobox(QWidget):
         layout.addWidget(self.button)
         
     def show_menu(self):
+        # Check if menu is empty and show message if so
+        if self.menu.isEmpty():
+            QMessageBox.information(self, "Constraints", "All constraints added")
+            return
+            
         # Reset any previous size caps
         try:
             self.menu.setMinimumHeight(0)
@@ -139,8 +144,8 @@ class Sidebar(QWidget):
         'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'constraints'},
-        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity (deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'constraints'},
-        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration (deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'constraints'}
+        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity<br/>(deg/s)', 'step': 1.0, 'range': (0, 720), 'removable': True, 'section': 'constraints'},
+        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration<br/>(deg/s²)', 'step': 1.0, 'range': (0, 7200), 'removable': True, 'section': 'constraints'}
     }        
 
     # Map UI spinner keys to model attribute names (for rotation fields in degrees)
@@ -182,7 +187,7 @@ class Sidebar(QWidget):
         top_section = QWidget()
         top_layout = QHBoxLayout(top_section)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(6)
+        top_layout.setSpacing(20)
         
         label = QLabel("Path Elements")
         top_layout.addWidget(label)
@@ -237,11 +242,7 @@ class Sidebar(QWidget):
         
         title_bar_layout.addStretch()
         
-        self.optional_pop = PopupCombobox()
-        self.optional_pop.setText("Add constraint")
-        self.optional_pop.setToolTip("Add an optional constraint")
-        self.optional_pop.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        title_bar_layout.addWidget(self.optional_pop)
+        # Note: the constraints add button is moved to a separate "Path constraints" title bar
         
         main_layout.addWidget(self.title_bar)
         
@@ -258,44 +259,27 @@ class Sidebar(QWidget):
         group_box_spinner_layout.setContentsMargins(6, 6, 6, 6)
         group_box_spinner_layout.setSpacing(8)
 
-        # Collapsible sections using QToolBox
-        self.toolbox = QToolBox()
-        self.toolbox.setObjectName("propertiesToolbox")
-        self.toolbox.setStyleSheet(
-            """
-            QToolBox { background: transparent; }
-            QToolBox::tab {
-                font-weight: 600; padding: 6px 8px; background: #303030;
-                color: #eaeaea; border: 1px solid #444; border-bottom: none;
-                border-top-left-radius: 4px; border-top-right-radius: 4px; margin-left: 6px;
-            }
-            QToolBox::tab:selected { background: #3a3a3a; color: #ffffff; }
-            QToolBox::tab:hover { background: #363636; }
-            QToolBox > QWidget { background: #2a2a2a; border: 1px solid #444; }
-            """
-        )
-
-        # Core section (always available): x/y and rotation (if applicable)
+        # Properties form (no collapsibles): keep type selector and core spinners together
         self.core_page = QWidget()
         self.core_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.core_layout = QFormLayout(self.core_page)
         self.core_layout.setLabelAlignment(Qt.AlignRight)
         self.core_layout.setVerticalSpacing(8)
         self.core_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.toolbox.addItem(self.core_page, "Core")
 
-        # Constraints section (combined optional fields)
-        self.constraints_page = QWidget()
-        self.constraints_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.constraints_layout = QFormLayout(self.constraints_page)
+        # Separate constraints group below with its own title bar (created later) and form layout
+        self.constraints_form_container = QGroupBox()
+        self.constraints_form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.constraints_form_container.setStyleSheet(
+            """
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+            QLabel { color: #f0f0f0; }
+            """
+        )
+        self.constraints_layout = QFormLayout(self.constraints_form_container)
         self.constraints_layout.setLabelAlignment(Qt.AlignRight)
         self.constraints_layout.setVerticalSpacing(8)
         self.constraints_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.toolbox.addItem(self.constraints_page, "Constraints")
-
-        # For remembering last-open section per element
-        self._last_opened_section_by_element = {}
-        self.toolbox.currentChanged.connect(self._remember_current_section)
         
 
         # Store label references for each spinner
@@ -320,6 +304,8 @@ class Sidebar(QWidget):
         header_row_layout.addWidget(self.type_label)
         header_row_layout.addWidget(self.optional_container, 1)
         group_box_spinner_layout.addWidget(header_row)
+        # Place the core form (type + core spinners) directly in this group
+        group_box_spinner_layout.addWidget(self.core_page)
         
         for name, data in self.spinner_metadata.items():
             spin = QDoubleSpinBox()
@@ -330,9 +316,16 @@ class Sidebar(QWidget):
             spin.setMaximumWidth(200) # Allow expansion when sidebar is wider
             spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             label = QLabel(data['label'])
-            label.setWordWrap(True)
+            # Check if label contains HTML and adjust wrapping accordingly
+            if '<br/>' in data['label']:
+                label.setWordWrap(False)  # Disable word wrap for HTML labels
+                label.setTextFormat(Qt.RichText)  # Enable HTML rendering
+            else:
+                label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            label.setToolTip(data['label'])
+            # Use plain text for tooltip (remove HTML tags)
+            tooltip_text = data['label'].replace('<br/>', ' ')
+            label.setToolTip(tooltip_text)
             label.setMinimumWidth(120) # Ensure labels have reasonable minimum width
 
             # Add button next to spinner
@@ -375,15 +368,49 @@ class Sidebar(QWidget):
                 self.core_layout.addRow(label, spin_row)
             self.spinners[name] = (spin, label, btn, spin_row)
 
-        group_box_spinner_layout.addWidget(self.toolbox)
-        # Make toolbox expand to fill available space
-        self.toolbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # Stretch to consume remaining vertical space
         group_box_spinner_layout.addStretch(1)
         # Subtle padding around the form
         self.form_container.setContentsMargins(6, 6, 6, 6)
 
         main_layout.addWidget(self.form_container)
+
+        # Constraints title bar and add button (moved here)
+        self.constraints_title_bar = QWidget()
+        self.constraints_title_bar.setObjectName("constraintsTitleBar")
+        self.constraints_title_bar.setStyleSheet(
+            """
+            QWidget#constraintsTitleBar {
+                background-color: #2f2f2f;
+                border: 1px solid #4a4a4a;
+                border-radius: 6px;
+            }
+            """
+        )
+        constraints_title_layout = QHBoxLayout(self.constraints_title_bar)
+        constraints_title_layout.setContentsMargins(10, 0, 10, 0)
+        constraints_title_layout.setSpacing(20)
+        constraints_label = QLabel("Path constraints")
+        constraints_label.setStyleSheet(
+            """
+            font-size: 14px;
+            font-weight: bold;
+            color: #eeeeee;
+            background: transparent;
+            border: none;
+            padding: 6px 0;
+            """
+        )
+        constraints_title_layout.addWidget(constraints_label)
+        constraints_title_layout.addStretch()
+        self.optional_pop = PopupCombobox()
+        self.optional_pop.setText("Add constraint")
+        self.optional_pop.setToolTip("Add an optional constraint")
+        self.optional_pop.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        constraints_title_layout.addWidget(self.optional_pop)
+
+        main_layout.addWidget(self.constraints_title_bar)
+        main_layout.addWidget(self.constraints_form_container)
         main_layout.addStretch() # Pushes all content to the top
         
         # Defer selection handling to the next event loop to avoid re-entrancy
@@ -412,6 +439,11 @@ class Sidebar(QWidget):
         self.type_label.setVisible(False)
         self.form_container.setVisible(False)
         self.title_bar.setVisible(False)
+        # Hide constraints section too
+        if hasattr(self, 'constraints_title_bar'):
+            self.constraints_title_bar.setVisible(False)
+        if hasattr(self, 'constraints_form_container'):
+            self.constraints_form_container.setVisible(False)
 
     def set_suspended(self, suspended: bool):
         self._suspended = bool(suspended)
@@ -564,10 +596,6 @@ class Sidebar(QWidget):
         else:
             self.optional_pop.clear()
 
-        # Rebuild tabs to reflect whether constraints have any content
-        self._rebuild_toolbox_pages(has_constraints)
-        QTimer.singleShot(0, lambda e=element: self._restore_last_opened_section(e))
-
         # Rotation already first in Core via metadata order; no row surgery required
         # Ensure visible spin boxes reflect current config bounds if modified
         self._refresh_spinner_metadata_bounds()
@@ -625,69 +653,7 @@ class Sidebar(QWidget):
                 finally:
                     spin.blockSignals(False)
 
-    def _refresh_toolbox_sections(self, element):
-        # Determine if constraints section has any visible rows
-        def layout_has_visible_rows(layout: QFormLayout) -> bool:
-            for i in range(layout.rowCount()):
-                field_item = layout.itemAt(i, QFormLayout.FieldRole)
-                if field_item:
-                    w = field_item.widget()
-                    if w and w.isVisible():
-                        return True
-            return False
-
-        show_constraints = layout_has_visible_rows(self.constraints_layout)
-        self._set_toolbox_enabled(show_constraints)
-
-    def _rebuild_toolbox_pages(self, show_constraints: bool):
-        self.toolbox.blockSignals(True)
-        try:
-            self.toolbox.setItemEnabled(1, show_constraints)  # Index 1: Constraints
-            self.constraints_page.setVisible(show_constraints)
-            if self.toolbox.currentIndex() > 0 and not self.toolbox.widget(self.toolbox.currentIndex()).isVisible():
-                self.toolbox.setCurrentIndex(0)
-        finally:
-            self.toolbox.blockSignals(False)
-
-    def _set_toolbox_enabled(self, show_constraints: bool):
-        # Show/hide pages without removing them to avoid deleting widgets
-        self.toolbox.blockSignals(True)
-        try:
-            self.core_page.setVisible(True)
-            self.constraints_page.setVisible(bool(show_constraints))
-            # If current page hidden, jump to Core
-            cur = self.toolbox.currentIndex()
-            current_widget = self.toolbox.widget(cur) if cur >= 0 else None
-            if current_widget is not None and not current_widget.isVisible():
-                self.toolbox.setCurrentIndex(0)
-        finally:
-            self.toolbox.blockSignals(False)
-
-    def _remember_current_section(self, index: int):
-        # Remember by tab text for current element
-        element_index = self.get_selected_index()
-        if element_index is None or self.path is None:
-            return
-        if index < 0 or index >= self.toolbox.count():
-            return
-        key = self.toolbox.itemText(index)
-        try:
-            element = self.path.get_element(element_index)
-            self._last_opened_section_by_element[id(element)] = key
-        except Exception:
-            pass
-
-    def _restore_last_opened_section(self, element):
-        desired = self._last_opened_section_by_element.get(id(element))
-        if desired is None:
-            self.toolbox.setCurrentIndex(0)
-            return
-        for i in range(self.toolbox.count()):
-            if self.toolbox.itemText(i) == desired:
-                self.toolbox.setCurrentIndex(i)
-                return
-        # Fallback
-        self.toolbox.setCurrentIndex(0)
+    # Removed toolbox-related helpers after layout refactor
 
     def on_item_selected(self):
         try:
@@ -750,7 +716,7 @@ class Sidebar(QWidget):
             
             # Show controls (guarded)
             try:
-                for widget in (self.type_label, self.type_combo, self.form_container, self.title_bar):
+                for widget in (self.type_label, self.type_combo, self.form_container, self.title_bar, self.constraints_title_bar, self.constraints_form_container):
                     if widget is not None:
                         widget.setVisible(True)
             except (RuntimeError, AttributeError):
@@ -839,10 +805,6 @@ class Sidebar(QWidget):
         def _refresh_and_focus_constraints(e=element):
             try:
                 self.expose_element(e)
-                # Auto-expand the Constraints section if it's available
-                # Index 1 is Constraints
-                if hasattr(self, 'constraints_page'):
-                    self.toolbox.setCurrentIndex(1)
             except Exception:
                 pass
         QTimer.singleShot(0, _refresh_and_focus_constraints)

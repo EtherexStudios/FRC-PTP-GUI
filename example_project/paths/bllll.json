@@ -4,15 +4,16 @@
     "x_meters": 5.78,
     "y_meters": 6.54,
     "final_velocity_meters_per_sec": 0.0,
-    "max_velocity_meters_per_sec": 3.0,
     "max_acceleration_meters_per_sec2": 2.5,
     "intermediate_handoff_radius_meters": 0.55
   },
   {
     "type": "rotation",
     "rotation_radians": 0.7850490975470493,
-    "x_meters": 6.888872188941588,
-    "y_meters": 5.680058302453463
+    "x_meters": 6.889483470819833,
+    "y_meters": 5.679584247119314,
+    "max_velocity_rad_per_sec": 3.141592653589793,
+    "max_acceleration_rad_per_sec2": 6.283185307179586
   },
   {
     "type": "waypoint",
