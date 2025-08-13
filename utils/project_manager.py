@@ -282,7 +282,7 @@ class ProjectManager:
         return new_path, used
 
     # --------------- Serialization helpers ---------------
-    def _serialize_path(self, path: Path) -> List[Dict[str, Any]]:
+    def _serialize_path(self, path: Path) -> Dict[str, Any]:
         items: List[Dict[str, Any]] = []
         for elem in path.path_elements:
             if isinstance(elem, TranslationTarget):
@@ -291,13 +291,7 @@ class ProjectManager:
                     "x_meters": float(elem.x_meters),
                     "y_meters": float(elem.y_meters),
                 }
-                # Optionals
-                if elem.final_velocity_meters_per_sec is not None:
-                    d["final_velocity_meters_per_sec"] = float(elem.final_velocity_meters_per_sec)
-                if elem.max_velocity_meters_per_sec is not None:
-                    d["max_velocity_meters_per_sec"] = float(elem.max_velocity_meters_per_sec)
-                if elem.max_acceleration_meters_per_sec2 is not None:
-                    d["max_acceleration_meters_per_sec2"] = float(elem.max_acceleration_meters_per_sec2)
+                # Per-element optional handoff radius
                 if elem.intermediate_handoff_radius_meters is not None:
                     d["intermediate_handoff_radius_meters"] = float(elem.intermediate_handoff_radius_meters)
                 items.append(d)
@@ -308,22 +302,12 @@ class ProjectManager:
                     "x_meters": float(elem.x_meters),
                     "y_meters": float(elem.y_meters),
                 }
-                if elem.max_velocity_rad_per_sec is not None:
-                    d["max_velocity_rad_per_sec"] = float(elem.max_velocity_rad_per_sec)
-                if elem.max_acceleration_rad_per_sec2 is not None:
-                    d["max_acceleration_rad_per_sec2"] = float(elem.max_acceleration_rad_per_sec2)
                 items.append(d)
             elif isinstance(elem, Waypoint):
                 td = {
                     "x_meters": float(elem.translation_target.x_meters),
                     "y_meters": float(elem.translation_target.y_meters),
                 }
-                if elem.translation_target.final_velocity_meters_per_sec is not None:
-                    td["final_velocity_meters_per_sec"] = float(elem.translation_target.final_velocity_meters_per_sec)
-                if elem.translation_target.max_velocity_meters_per_sec is not None:
-                    td["max_velocity_meters_per_sec"] = float(elem.translation_target.max_velocity_meters_per_sec)
-                if elem.translation_target.max_acceleration_meters_per_sec2 is not None:
-                    td["max_acceleration_meters_per_sec2"] = float(elem.translation_target.max_acceleration_meters_per_sec2)
                 if elem.translation_target.intermediate_handoff_radius_meters is not None:
                     td["intermediate_handoff_radius_meters"] = float(elem.translation_target.intermediate_handoff_radius_meters)
 
@@ -332,10 +316,6 @@ class ProjectManager:
                     "x_meters": float(elem.rotation_target.x_meters),
                     "y_meters": float(elem.rotation_target.y_meters),
                 }
-                if elem.rotation_target.max_velocity_rad_per_sec is not None:
-                    rd["max_velocity_rad_per_sec"] = float(elem.rotation_target.max_velocity_rad_per_sec)
-                if elem.rotation_target.max_acceleration_rad_per_sec2 is not None:
-                    rd["max_acceleration_rad_per_sec2"] = float(elem.rotation_target.max_acceleration_rad_per_sec2)
 
                 items.append({
                     "type": "waypoint",
@@ -345,13 +325,59 @@ class ProjectManager:
             else:
                 # Unknown type – skip
                 continue
-        return items
+        # Build constraints section only with non-None values
+        constraints_obj: Dict[str, Any] = {}
+        if hasattr(path, 'constraints') and path.constraints is not None:
+            c = path.constraints
+            # translation constraints
+            for name in [
+                "initial_velocity_meters_per_sec",
+                "final_velocity_meters_per_sec",
+                "max_velocity_meters_per_sec",
+                "max_acceleration_meters_per_sec2",
+            ]:
+                val = getattr(c, name, None)
+                if val is not None:
+                    constraints_obj[name] = float(val)
+            # rotation constraints (deg-domain)
+            for name in [
+                "max_velocity_deg_per_sec",
+                "max_acceleration_deg_per_sec2",
+            ]:
+                val = getattr(c, name, None)
+                if val is not None:
+                    constraints_obj[name] = float(val)
+        # Compose top-level JSON object with constraints first
+        result: Dict[str, Any] = {}
+        if constraints_obj:
+            result["constraints"] = constraints_obj
+        result["path_elements"] = items
+        return result
 
     def _deserialize_path(self, data: Any) -> Path:
         path = Path()
-        if not isinstance(data, list):
-            return path
-        for item in data:
+        # Support legacy list-only format
+        if isinstance(data, list):
+            items = data
+        else:
+            if not isinstance(data, dict):
+                return path
+            # Load constraints block if present
+            constraints_block = data.get("constraints", {}) or {}
+            if isinstance(constraints_block, dict) and hasattr(path, 'constraints') and path.constraints is not None:
+                for name in [
+                    "initial_velocity_meters_per_sec",
+                    "final_velocity_meters_per_sec",
+                    "max_velocity_meters_per_sec",
+                    "max_acceleration_meters_per_sec2",
+                    "max_velocity_deg_per_sec",
+                    "max_acceleration_deg_per_sec2",
+                ]:
+                    if name in constraints_block:
+                        setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))
+            items = data.get("path_elements", []) if isinstance(data.get("path_elements", []), list) else []
+        # Load path elements
+        for item in items:
             try:
                 if not isinstance(item, dict):
                     continue
@@ -360,9 +386,6 @@ class ProjectManager:
                     el = TranslationTarget(
                         x_meters=float(item.get("x_meters", 0.0)),
                         y_meters=float(item.get("y_meters", 0.0)),
-                        final_velocity_meters_per_sec=self._opt_float(item.get("final_velocity_meters_per_sec")),
-                        max_velocity_meters_per_sec=self._opt_float(item.get("max_velocity_meters_per_sec")),
-                        max_acceleration_meters_per_sec2=self._opt_float(item.get("max_acceleration_meters_per_sec2")),
                         intermediate_handoff_radius_meters=self._opt_float(item.get("intermediate_handoff_radius_meters")),
                     )
                     path.path_elements.append(el)
@@ -371,8 +394,6 @@ class ProjectManager:
                         rotation_radians=float(item.get("rotation_radians", 0.0)),
                         x_meters=float(item.get("x_meters", 0.0)),
                         y_meters=float(item.get("y_meters", 0.0)),
-                        max_velocity_rad_per_sec=self._opt_float(item.get("max_velocity_rad_per_sec")),
-                        max_acceleration_rad_per_sec2=self._opt_float(item.get("max_acceleration_rad_per_sec2")),
                     )
                     path.path_elements.append(el)
                 elif typ == "waypoint":
@@ -382,17 +403,12 @@ class ProjectManager:
                         translation_target=TranslationTarget(
                             x_meters=float(tt.get("x_meters", 0.0)),
                             y_meters=float(tt.get("y_meters", 0.0)),
-                            final_velocity_meters_per_sec=self._opt_float(tt.get("final_velocity_meters_per_sec")),
-                            max_velocity_meters_per_sec=self._opt_float(tt.get("max_velocity_meters_per_sec")),
-                            max_acceleration_meters_per_sec2=self._opt_float(tt.get("max_acceleration_meters_per_sec2")),
                             intermediate_handoff_radius_meters=self._opt_float(tt.get("intermediate_handoff_radius_meters")),
                         ),
                         rotation_target=RotationTarget(
                             rotation_radians=float(rt.get("rotation_radians", 0.0)),
                             x_meters=float(rt.get("x_meters", 0.0)),
                             y_meters=float(rt.get("y_meters", 0.0)),
-                            max_velocity_rad_per_sec=self._opt_float(rt.get("max_velocity_rad_per_sec")),
-                            max_acceleration_rad_per_sec2=self._opt_float(rt.get("max_acceleration_rad_per_sec2")),
                         ),
                     )
                     path.path_elements.append(el)
