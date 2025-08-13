@@ -7,12 +7,18 @@ class PathElement(ABC):
     pass
 
 @dataclass
+class Constraints:
+    initial_velocity_meters_per_sec: Optional[float] = None
+    final_velocity_meters_per_sec: Optional[float] = None
+    max_velocity_meters_per_sec: Optional[float] = None
+    max_acceleration_meters_per_sec2: Optional[float] = None
+    max_velocity_deg_per_sec: Optional[float] = None
+    max_acceleration_deg_per_sec2: Optional[float] = None
+
+@dataclass
 class TranslationTarget(PathElement):
     x_meters : float = 0
     y_meters : float = 0
-    final_velocity_meters_per_sec : Optional[float] = None
-    max_velocity_meters_per_sec : Optional[float] = None
-    max_acceleration_meters_per_sec2 : Optional[float] = None
     intermediate_handoff_radius_meters : Optional[float] = None
 
 @dataclass
@@ -20,8 +26,6 @@ class RotationTarget(PathElement):
     rotation_radians : float = 0
     x_meters : float = 0
     y_meters : float = 0
-    max_velocity_rad_per_sec : Optional[float] = None
-    max_acceleration_rad_per_sec2 : Optional[float] = None
 
 @dataclass
 class Waypoint(PathElement):
@@ -31,6 +35,7 @@ class Waypoint(PathElement):
 @dataclass
 class Path:
     path_elements : List[PathElement] = field(default_factory=list)
+    constraints : Constraints = field(default_factory=Constraints)
 
     def get_element(self, index: int) -> PathElement:
         if 0 <= index < len(self.path_elements):
