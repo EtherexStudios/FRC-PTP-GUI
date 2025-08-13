@@ -141,6 +141,7 @@ class Sidebar(QWidget):
         # Handoff radius is a core control for TranslationTarget and Waypoint
         'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': False, 'section': 'core'}, 
         # Constraints (optional)
+        'initial_velocity_meters_per_sec': {'label': 'Initial Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 20), 'removable': True, 'section': 'constraints'},
@@ -150,9 +151,7 @@ class Sidebar(QWidget):
 
     # Map UI spinner keys to model attribute names (for rotation fields in degrees)
     degrees_to_radians_attr_map = {
-        'rotation_degrees': 'rotation_radians',
-        'max_velocity_deg_per_sec': 'max_velocity_rad_per_sec',
-        'max_acceleration_deg_per_sec2': 'max_acceleration_rad_per_sec2',
+        'rotation_degrees': 'rotation_radians'
     }
 
     @classmethod
@@ -344,6 +343,7 @@ class Sidebar(QWidget):
             if data.get('removable', True):
                 btn.setIcon(QIcon("assets/remove_icon.png"))
                 # Connect button to remove attribute
+                # Remove path-level constraints via this handler too
                 btn.clicked.connect(lambda checked=False, n=name: self.on_attribute_removed(n))
             else:
                 btn.setIcon(QIcon()) # Blank icon
@@ -356,6 +356,7 @@ class Sidebar(QWidget):
             spin_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
             # FIX: capture 'name' as a default argument in the lambda
+            # For path constraints, this will update Path.constraints
             spin.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
 
             # Add to the appropriate section based on metadata
@@ -408,6 +409,8 @@ class Sidebar(QWidget):
         self.optional_pop.setToolTip("Add an optional constraint")
         self.optional_pop.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         constraints_title_layout.addWidget(self.optional_pop)
+        # Populate available constraint keys immediately
+        self.optional_display_to_key = {}
 
         main_layout.addWidget(self.constraints_title_bar)
         main_layout.addWidget(self.constraints_form_container)
@@ -423,7 +426,7 @@ class Sidebar(QWidget):
 
         self.type_combo.currentTextChanged.connect(self.on_type_change)
 
-        self.optional_pop.item_selected.connect(self.on_attribute_added)
+        self.optional_pop.item_selected.connect(self.on_constraint_added)
         
         # Add element dropdown wiring
         self.add_element_pop.item_selected.connect(self.on_add_element_selected)
@@ -517,7 +520,6 @@ class Sidebar(QWidget):
             return False
 
         # Decide which owners contribute which fields
-        has_constraints = False
         # First hide all rows; we'll only show those that are present/selected
         for name, (spin, label, btn, spin_row) in self.spinners.items():
             label.setVisible(False)
@@ -540,21 +542,6 @@ class Sidebar(QWidget):
                     spin.blockSignals(False)
                 label.setVisible(True)
                 spin_row.setVisible(True)
-            # Constraints
-            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
-                if show_attr(element.translation_target, name):
-                    has_constraints = True
-                else:
-                    display = Sidebar._label(name)
-                    optional_display_items.append(display)
-                    self.optional_display_to_key[display] = name
-            for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
-                if show_deg_attr(element.rotation_target, name):
-                    has_constraints = True
-                else:
-                    display = Sidebar._label(name)
-                    optional_display_items.append(display)
-                    self.optional_display_to_key[display] = name
         elif isinstance(element, TranslationTarget):
             show_attr(element, 'x_meters')
             show_attr(element, 'y_meters')
@@ -569,26 +556,55 @@ class Sidebar(QWidget):
                     spin.blockSignals(False)
                 label.setVisible(True)
                 spin_row.setVisible(True)
-            # Constraints
-            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
-                if show_attr(element, name):
-                    has_constraints = True
-                else:
-                    display = Sidebar._label(name)
-                    optional_display_items.append(display)
-                    self.optional_display_to_key[display] = name
         elif isinstance(element, RotationTarget):
             show_attr(element, 'x_meters')
             show_attr(element, 'y_meters')
             show_deg_attr(element, 'rotation_degrees')
-            for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
-                if show_deg_attr(element, name):
-                    has_constraints = True
-                else:
-                    display = Sidebar._label(name)
-                    optional_display_items.append(display)
-                    self.optional_display_to_key[display] = name
 
+        # Path-level constraints panel
+        # Build options list and show present constraints
+        self.optional_pop.clear()
+        self.optional_display_to_key = {}
+        optional_display_items = []
+        has_constraints = False
+        if self.path is not None and hasattr(self.path, 'constraints') and self.path.constraints is not None:
+            c = self.path.constraints
+            # Translation constraints
+            for name in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
+                if hasattr(c, name):
+                    val = getattr(c, name)
+                    if val is not None and name in self.spinners:
+                        spin, label, btn, spin_row = self.spinners[name]
+                        try:
+                            spin.blockSignals(True)
+                            spin.setValue(float(val))
+                        finally:
+                            spin.blockSignals(False)
+                        label.setVisible(True)
+                        spin_row.setVisible(True)
+                        has_constraints = True
+                    else:
+                        display = Sidebar._label(name)
+                        optional_display_items.append(display)
+                        self.optional_display_to_key[display] = name
+            # Rotation constraints (deg domain)
+            for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+                if hasattr(c, name):
+                    val = getattr(c, name)
+                    if val is not None and name in self.spinners:
+                        spin, label, btn, spin_row = self.spinners[name]
+                        try:
+                            spin.blockSignals(True)
+                            spin.setValue(float(val))
+                        finally:
+                            spin.blockSignals(False)
+                        label.setVisible(True)
+                        spin_row.setVisible(True)
+                        has_constraints = True
+                    else:
+                        display = Sidebar._label(name)
+                        optional_display_items.append(display)
+                        self.optional_display_to_key[display] = name
         # Populate the optional dropdown sorted
         if optional_display_items:
             optional_display_items = sorted(list(dict.fromkeys(optional_display_items)))
@@ -596,7 +612,6 @@ class Sidebar(QWidget):
         else:
             self.optional_pop.clear()
 
-        # Rotation already first in Core via metadata order; no row surgery required
         # Ensure visible spin boxes reflect current config bounds if modified
         self._refresh_spinner_metadata_bounds()
 
@@ -736,20 +751,22 @@ class Sidebar(QWidget):
             return
         
         element = self.path.get_element(idx)
-        # Map degree-based keys to model attributes as needed
-        if key in Sidebar.degrees_to_radians_attr_map:
+        # Map degree-based keys for element rotation angle only
+        if key == 'rotation_degrees':
             mapped = Sidebar.degrees_to_radians_attr_map[key]
             if isinstance(element, Waypoint):
                 if hasattr(element.rotation_target, mapped):
                     setattr(element.rotation_target, mapped, None)
             elif hasattr(element, mapped):
                 setattr(element, mapped, None)
+        elif key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+            # Removing a path-level constraint
+            if hasattr(self.path, 'constraints'):
+                setattr(self.path.constraints, key, None)
         else:
             if isinstance(element, Waypoint):
                 if hasattr(element.translation_target, key):
                     setattr(element.translation_target, key, None)
-                if hasattr(element.rotation_target, key):
-                    setattr(element.rotation_target, key, None)
             elif hasattr(element, key):
                 setattr(element, key, None)
         
@@ -775,13 +792,14 @@ class Sidebar(QWidget):
         except Exception:
             cfg_default = None
 
-        if real_key in Sidebar.degrees_to_radians_attr_map:
+        # Path-level constraints or element attributes
+        if real_key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+            base_val = float(cfg_default) if cfg_default is not None else 0.0
+            if hasattr(self.path, 'constraints'):
+                setattr(self.path.constraints, real_key, base_val)
+        elif real_key in Sidebar.degrees_to_radians_attr_map and real_key == 'rotation_degrees':
             mapped = Sidebar.degrees_to_radians_attr_map[real_key]
-            # Default from config is in degrees; convert to radians
-            if cfg_default is None:
-                deg_val = 0.0
-            else:
-                deg_val = float(cfg_default)
+            deg_val = float(cfg_default) if cfg_default is not None else 0.0
             rad_val = math.radians(deg_val)
             if isinstance(element, Waypoint):
                 if hasattr(element.rotation_target, mapped):
@@ -789,16 +807,10 @@ class Sidebar(QWidget):
             elif hasattr(element, mapped):
                 setattr(element, mapped, rad_val)
         else:
-            # Distance/velocity defaults use meters or m/s units
-            if cfg_default is None:
-                base_val = 0.0
-            else:
-                base_val = float(cfg_default)
+            base_val = float(cfg_default) if cfg_default is not None else 0.0
             if isinstance(element, Waypoint):
                 if hasattr(element.translation_target, real_key):
                     setattr(element.translation_target, real_key, base_val)
-                if hasattr(element.rotation_target, real_key):
-                    setattr(element.rotation_target, real_key, base_val)
             elif hasattr(element, real_key):
                 setattr(element, real_key, base_val)
         # Defer UI refresh to allow QMenu to close cleanly, then rebuild dropdown
@@ -836,17 +848,12 @@ class Sidebar(QWidget):
             translation_attrs = [
                 'x_meters',
                 'y_meters',
-                'final_velocity_meters_per_sec',
-                'max_velocity_meters_per_sec',
-                'max_acceleration_meters_per_sec2',
                 'intermediate_handoff_radius_meters'
             ]
             rotation_attrs = [
                 'rotation_radians',
                 'x_meters',
-                'y_meters',
-                'max_velocity_rad_per_sec',
-                'max_acceleration_rad_per_sec2'
+                'y_meters'
             ]
 
             translation_values = {attr: getattr(prev, attr, None) for attr in translation_attrs}
@@ -862,16 +869,11 @@ class Sidebar(QWidget):
                     rotation_values['rotation_radians'] if rotation_values['rotation_radians'] else 0,
                     rotation_values['x_meters'] if rotation_values['x_meters'] else 0.0,
                     rotation_values['y_meters'] if rotation_values['y_meters'] else 0.0,
-                    rotation_values['max_velocity_rad_per_sec'],
-                    rotation_values['max_acceleration_rad_per_sec2'],
                 )
             elif new_type == ElementType.TRANSLATION:
                 new_elem = TranslationTarget(
                     translation_values['x_meters'] if translation_values['x_meters'] else 0.0,
                     translation_values['y_meters'] if translation_values['y_meters'] else 0.0,
-                    translation_values['final_velocity_meters_per_sec'],
-                    translation_values['max_velocity_meters_per_sec'],
-                    translation_values['max_acceleration_meters_per_sec2'],
                     translation_values['intermediate_handoff_radius_meters']
                 )
             elif new_type == ElementType.WAYPOINT:
@@ -991,43 +993,60 @@ class Sidebar(QWidget):
         if idx is not None and self.path is not None:
             element = self.path.get_element(idx)
             if key in Sidebar.degrees_to_radians_attr_map:
+                # Degrees-mapped keys only apply to rotation_degrees on element; other deg constraints are path-level
                 mapped = Sidebar.degrees_to_radians_attr_map[key]
-                # Clamp using degrees-domain metadata before converting
-                clamped_deg = Sidebar._clamp_from_metadata(key, float(value))
-                rad_value = math.radians(clamped_deg)
-                if isinstance(element, Waypoint):
-                    if hasattr(element.rotation_target, mapped):
-                        setattr(element.rotation_target, mapped, rad_value)
-                elif hasattr(element, mapped):
-                    setattr(element, mapped, rad_value)
+                if key == 'rotation_degrees':
+                    clamped_deg = Sidebar._clamp_from_metadata(key, float(value))
+                    rad_value = math.radians(clamped_deg)
+                    if isinstance(element, Waypoint):
+                        if hasattr(element.rotation_target, mapped):
+                            setattr(element.rotation_target, mapped, rad_value)
+                    elif hasattr(element, mapped):
+                        setattr(element, mapped, rad_value)
+                else:
+                    # Path-level rotation constraints
+                    if self.path is not None and hasattr(self.path, 'constraints'):
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(self.path.constraints, key, clamped)
             else:
-                if isinstance(element, Waypoint):
-                    if hasattr(element.translation_target, key):
+                # Core element attributes or path-level constraints
+                path_constraint_keys = [
+                    'initial_velocity_meters_per_sec',
+                    'final_velocity_meters_per_sec',
+                    'max_velocity_meters_per_sec',
+                    'max_acceleration_meters_per_sec2',
+                    'max_velocity_deg_per_sec',
+                    'max_acceleration_deg_per_sec2',
+                ]
+                if key in path_constraint_keys:
+                    if self.path is not None and hasattr(self.path, 'constraints'):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
-                        setattr(element.translation_target, key, clamped)
-                        # Reproject all rotation targets since endpoints changed
-                        self._reproject_all_rotation_positions()
-                    if hasattr(element.rotation_target, key):
-                        clamped = Sidebar._clamp_from_metadata(key, float(value))
-                        setattr(element.rotation_target, key, clamped)
-                elif hasattr(element, key):
-                    if isinstance(element, RotationTarget) and key in ('x_meters', 'y_meters'):
-                        # Project rotation element onto segment between neighbors; adjust both x and y
-                        desired_x = float(value) if key == 'x_meters' else float(element.x_meters)
-                        desired_y = float(value) if key == 'y_meters' else float(element.y_meters)
-                        desired_x = Sidebar._clamp_from_metadata('x_meters', desired_x)
-                        desired_y = Sidebar._clamp_from_metadata('y_meters', desired_y)
-                        proj_x, proj_y = self._project_point_between_neighbors(idx, desired_x, desired_y)
-                        element.x_meters = proj_x
-                        element.y_meters = proj_y
-                        # Keep the UI in sync immediately
-                        self.update_current_values_only()
-                    else:
-                        clamped = Sidebar._clamp_from_metadata(key, float(value))
-                        setattr(element, key, clamped)
-                        # If a translation target moved, reproject rotations
-                        if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
+                        setattr(self.path.constraints, key, clamped)
+                else:
+                    if isinstance(element, Waypoint):
+                        if hasattr(element.translation_target, key):
+                            clamped = Sidebar._clamp_from_metadata(key, float(value))
+                            setattr(element.translation_target, key, clamped)
+                            # Reproject all rotation targets since endpoints changed
                             self._reproject_all_rotation_positions()
+                    elif hasattr(element, key):
+                        if isinstance(element, RotationTarget) and key in ('x_meters', 'y_meters'):
+                            # Project rotation element onto segment between neighbors; adjust both x and y
+                            desired_x = float(value) if key == 'x_meters' else float(element.x_meters)
+                            desired_y = float(value) if key == 'y_meters' else float(element.y_meters)
+                            desired_x = Sidebar._clamp_from_metadata('x_meters', desired_x)
+                            desired_y = Sidebar._clamp_from_metadata('y_meters', desired_y)
+                            proj_x, proj_y = self._project_point_between_neighbors(idx, desired_x, desired_y)
+                            element.x_meters = proj_x
+                            element.y_meters = proj_y
+                            # Keep the UI in sync immediately
+                            self.update_current_values_only()
+                        else:
+                            clamped = Sidebar._clamp_from_metadata(key, float(value))
+                            setattr(element, key, clamped)
+                            # If a translation target moved, reproject rotations
+                            if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
+                                self._reproject_all_rotation_positions()
             self.modelChanged.emit()
 
     def rebuild_points_list(self):
@@ -1354,3 +1373,25 @@ class Sidebar(QWidget):
             # Rebuild UI and notify listeners
             self.rebuild_points_list()
             self.modelStructureChanged.emit()
+
+    def on_constraint_added(self, key):
+        if self.path is None:
+            return
+        # Translate display name back to actual key if needed
+        if hasattr(self, 'optional_display_to_key') and self.optional_display_to_key:
+            real_key = self.optional_display_to_key.get(key, key)
+        else:
+            real_key = key
+        # Determine default value from config if available
+        cfg_default = None
+        try:
+            if getattr(self, 'project_manager', None) is not None:
+                cfg_default = self.project_manager.get_default_optional_value(real_key)
+        except Exception:
+            cfg_default = None
+        base_val = float(cfg_default) if cfg_default is not None else 0.0
+        if hasattr(self.path, 'constraints'):
+            setattr(self.path.constraints, real_key, base_val)
+        # Refresh constraints UI
+        self.refresh_current_selection()
+        self.modelChanged.emit()
