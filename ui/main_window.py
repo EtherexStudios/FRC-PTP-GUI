@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
 
         # Initialize canvas with path
         self.canvas.set_path(self.path)
+        # Build initial simulation
+        self.canvas.request_simulation_rebuild()
 
         # Wire up interactions: sidebar <-> canvas
         self.sidebar.elementSelected.connect(self.canvas.select_index, Qt.QueuedConnection)
@@ -46,7 +48,9 @@ class MainWindow(QMainWindow):
         # Sidebar changes -> canvas refresh
         self.sidebar.modelChanged.connect(self.canvas.refresh_from_model)
         self.sidebar.modelChanged.connect(self.canvas.update_handoff_radius_visualizers)
+        self.sidebar.modelChanged.connect(self.canvas.request_simulation_rebuild)
         self.sidebar.modelStructureChanged.connect(lambda: self.canvas.set_path(self.path))
+        self.sidebar.modelStructureChanged.connect(self.canvas.request_simulation_rebuild)
 
         # Canvas interactions -> update model and sidebar
         self.canvas.elementMoved.connect(self._on_canvas_element_moved, Qt.QueuedConnection)
@@ -284,6 +288,8 @@ class MainWindow(QMainWindow):
             # Load config and apply canvas dims
             cfg = self.project_manager.load_config()
             self._apply_robot_dims_from_config(cfg)
+            # Config impacts constraints; rebuild sim
+            self.canvas.request_simulation_rebuild()
             # Load last or first or create
             path, filename = self.project_manager.load_last_or_first_or_create()
             self._set_path_model(path)
@@ -318,6 +324,7 @@ class MainWindow(QMainWindow):
         self._set_path_model(path)
         # Update the current path display after opening project
         self._update_current_path_display()
+        self.canvas.request_simulation_rebuild()
 
     def _open_recent_project(self, directory: str):
         if not directory:
@@ -329,6 +336,7 @@ class MainWindow(QMainWindow):
         self._set_path_model(path)
         # Update the current path display after opening recent project
         self._update_current_path_display()
+        self.canvas.request_simulation_rebuild()
 
     def _action_edit_config(self):
         cfg = self.project_manager.load_config()
@@ -338,6 +346,8 @@ class MainWindow(QMainWindow):
             self.project_manager.save_config(new_cfg)
             # Apply to canvas if robot dims changed
             self._apply_robot_dims_from_config(self.project_manager.config)
+            # Constraints/gains may change; rebuild sim
+            self.canvas.request_simulation_rebuild()
             # Sidebar will use defaults from project_manager when adding optionals
 
             # Refresh sidebar for current selection so defaults/UI reflect changes
@@ -359,6 +369,7 @@ class MainWindow(QMainWindow):
         self._set_path_model(p)
         # Update the current path display after loading a path
         self._update_current_path_display()
+        self.canvas.request_simulation_rebuild()
 
     def _action_save_as(self):
         if not self.project_manager.get_paths_dir():
@@ -670,6 +681,8 @@ class MainWindow(QMainWindow):
         self._update_current_path_display()
         # Save immediately to ensure file exists
         self._schedule_autosave()
+        # New path -> rebuild simulation
+        self.canvas.request_simulation_rebuild()
 
     def _update_current_path_display(self):
         """Update the current path display in the menu, window title, and status bar"""

@@ -2,11 +2,15 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView
 
 from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
+from models.simulation import simulate_path, SimResult
+from PySide6.QtWidgets import QPushButton, QSlider, QLabel, QWidget, QHBoxLayout, QStyle
+from PySide6.QtWidgets import QGraphicsProxyWidget
+from PySide6.QtCore import QRect, QSize
 
 
 FIELD_LENGTH_METERS = 16.54
@@ -451,6 +455,32 @@ class CanvasView(QGraphicsView):
 
         self._load_field_background("assets/field25.png")
 
+        # ----- Simulation state -----
+        self._sim_result: Optional[SimResult] = None
+        self._sim_poses_by_time: dict[float, tuple[float, float, float]] = {}
+        self._sim_times_sorted: list[float] = []
+        self._sim_total_time_s: float = 0.0
+        self._sim_current_time_s: float = 0.0
+        self._sim_timer: QTimer = QTimer(self)
+        self._sim_timer.setInterval(20)
+        self._sim_timer.timeout.connect(self._on_sim_tick)
+        self._sim_debounce: QTimer = QTimer(self)
+        self._sim_debounce.setSingleShot(True)
+        self._sim_debounce.setInterval(200)
+        self._sim_debounce.timeout.connect(self._rebuild_simulation_now)
+
+        # Sim robot graphics item
+        self._sim_robot_item: Optional[RobotSimItem] = None
+        self._ensure_sim_robot_item()
+
+        # Transport controls overlay
+        self._transport_proxy: Optional[QGraphicsProxyWidget] = None
+        self._transport_widget: Optional[QWidget] = None
+        self._transport_btn: Optional[QPushButton] = None
+        self._transport_slider: Optional[QSlider] = None
+        self._transport_label: Optional[QLabel] = None
+        self._build_transport_controls()
+
     def _load_field_background(self, image_path: str):
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
@@ -466,12 +496,86 @@ class CanvasView(QGraphicsView):
             self._field_pixmap_item.setPos(0.0, FIELD_WIDTH_METERS - h_scaled)
         self.graphics_scene.addItem(self._field_pixmap_item)
 
+    def _ensure_sim_robot_item(self):
+        try:
+            if self._sim_robot_item is not None:
+                return
+            item = RobotSimItem(self)
+            self.graphics_scene.addItem(item)
+            self._sim_robot_item = item
+            item.setVisible(False)
+        except Exception:
+            pass
+
+    def _build_transport_controls(self):
+        try:
+            if self._transport_widget is not None:
+                return
+            w = QWidget()
+            layout = QHBoxLayout(w)
+            layout.setContentsMargins(6, 4, 6, 4)
+            layout.setSpacing(8)
+
+            btn = QPushButton()
+            btn.setText("▶")
+            btn.setFixedWidth(28)
+            btn.clicked.connect(self._toggle_play_pause)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 0)
+            slider.setSingleStep(10)
+            slider.setPageStep(100)
+            slider.valueChanged.connect(self._on_slider_changed)
+            slider.sliderPressed.connect(self._on_slider_pressed)
+            slider.sliderReleased.connect(self._on_slider_released)
+
+            lbl = QLabel("0.00 / 0.00 s")
+            lbl.setFixedWidth(110)
+
+            layout.addWidget(btn)
+            layout.addWidget(slider, 1)
+            layout.addWidget(lbl)
+
+            proxy = QGraphicsProxyWidget()
+            proxy.setWidget(w)
+            proxy.setZValue(30)
+            # Keep fixed pixel size on screen
+            proxy.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            self.graphics_scene.addItem(proxy)
+
+            self._transport_proxy = proxy
+            self._transport_widget = w
+            self._transport_btn = btn
+            self._transport_slider = slider
+            self._transport_label = lbl
+
+            # Initial placement
+            QTimer.singleShot(0, self._position_transport_controls)
+        except Exception:
+            pass
+
+    def _position_transport_controls(self):
+        try:
+            if self._transport_proxy is None:
+                return
+            view_rect: QRect = self.viewport().rect()
+            # place 12 px from bottom-left
+            px = view_rect.left() + 12
+            py = view_rect.bottom() - 12 - (self._transport_widget.height() if self._transport_widget else 28)
+            # Map to scene
+            scene_pos = self.mapToScene(QPoint(int(px), int(py)))
+            self._transport_proxy.setPos(scene_pos)
+        except Exception:
+            pass
+
     def set_path(self, path: Path):
         self._path = path
         self._rebuild_items()
         # After rebuilding, ensure rotation items are properly positioned on their constraint lines
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
+        # Request a simulation rebuild
+        self.request_simulation_rebuild()
 
     def set_robot_dimensions(self, length_m: float, width_m: float):
         # Update and rebuild items to apply new sizes
@@ -483,6 +587,7 @@ class CanvasView(QGraphicsView):
         self._rebuild_items()
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
+        # Sim robot uses same size; nothing else needed
 
     def set_project_manager(self, project_manager):
         """Set the project manager reference to access default config values"""
@@ -610,6 +715,8 @@ class CanvasView(QGraphicsView):
         # Ensure rotation items are properly positioned on their constraint lines
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
+        # Request simulation rebuild due to model value changes
+        self.request_simulation_rebuild()
 
     def refresh_rotations_from_model(self):
         # Update only rotation items from the model
@@ -635,6 +742,8 @@ class CanvasView(QGraphicsView):
                 # Skip invalid items to prevent crashes
                 continue
         self._update_connecting_lines()
+        # Debounce sim rebuild on rotation changes
+        self.request_simulation_rebuild()
 
     def select_index(self, index: int):
         if index is None or index < 0 or index >= len(self._items):
@@ -690,11 +799,14 @@ class CanvasView(QGraphicsView):
         super().resizeEvent(event)
         # Defer fit to avoid re-entrancy during fullscreen transitions
         QTimer.singleShot(0, self._fit_to_scene)
+        # Reposition transport controls after resize
+        QTimer.singleShot(0, self._position_transport_controls)
 
     def showEvent(self, event):
         super().showEvent(event)
         # Defer initial fit until after show completes
         QTimer.singleShot(0, self._fit_to_scene)
+        QTimer.singleShot(0, self._position_transport_controls)
 
     def _fit_to_scene(self):
         if self._is_fitting:
@@ -992,6 +1104,8 @@ class CanvasView(QGraphicsView):
         # If an anchor moved, reproject any rotation items so they stay inline in real-time
         if kind in ('translation', 'waypoint'):
             self._reproject_rotation_items_in_scene()
+        # Live moves: debounce sim rebuild
+        self.request_simulation_rebuild()
 
     def _on_item_live_rotated(self, index: int, angle_radians: float):
         # Safety check to prevent segmentation faults
@@ -1017,6 +1131,8 @@ class CanvasView(QGraphicsView):
                     it.set_angle_radians(self._angle_for_translation_index(j))
                 except (AttributeError, TypeError):
                     continue
+        # Debounce sim rebuild on rotation changes
+        self.request_simulation_rebuild()
 
     def _on_item_clicked(self, index: int):
         self.elementSelected.emit(index)
@@ -1175,5 +1291,152 @@ class CanvasView(QGraphicsView):
 
         # Notify that a drag operation for this item has completed (for any item type)
         self.elementDragFinished.emit(index)
+        # Ensure a rebuild after a drag completes
+        self.request_simulation_rebuild()
+
+    # ---------------- Simulation API ----------------
+    def request_simulation_rebuild(self):
+        try:
+            self._sim_debounce.start()
+        except Exception:
+            pass
+
+    def _rebuild_simulation_now(self):
+        try:
+            if self._path is None:
+                self._sim_result = None
+                self._sim_poses_by_time = {}
+                self._sim_times_sorted = []
+                self._sim_total_time_s = 0.0
+                self._sim_current_time_s = 0.0
+                if self._sim_robot_item is not None:
+                    self._sim_robot_item.setVisible(False)
+                if self._transport_slider is not None:
+                    self._transport_slider.setRange(0, 0)
+                if self._transport_label is not None:
+                    self._transport_label.setText("0.00 / 0.00 s")
+                return
+
+            # Gather config if project manager exists
+            cfg = {}
+            try:
+                if hasattr(self, "_project_manager") and self._project_manager is not None:
+                    cfg = dict(self._project_manager.config or {})
+            except Exception:
+                cfg = {}
+
+            result = simulate_path(self._path, cfg)
+            self._sim_result = result
+            self._sim_poses_by_time = result.poses_by_time
+            self._sim_times_sorted = result.times_sorted
+            self._sim_total_time_s = float(result.total_time_s)
+            self._sim_current_time_s = 0.0
+
+            # Update UI controls
+            if self._transport_slider is not None:
+                self._transport_slider.blockSignals(True)
+                self._transport_slider.setRange(0, int(round(self._sim_total_time_s * 1000.0)))
+                self._transport_slider.setValue(0)
+                self._transport_slider.blockSignals(False)
+            if self._transport_label is not None:
+                self._transport_label.setText(f"0.00 / {self._sim_total_time_s:.2f} s")
+
+            # Place robot at start if available
+            if self._sim_robot_item is not None:
+                if self._sim_times_sorted:
+                    t0 = self._sim_times_sorted[0]
+                    x, y, th = self._sim_poses_by_time.get(t0, (0.0, 0.0, 0.0))
+                    self._set_sim_robot_pose(x, y, th)
+                    self._sim_robot_item.setVisible(True)
+                else:
+                    self._sim_robot_item.setVisible(False)
+        except Exception:
+            pass
+
+    def _set_sim_robot_pose(self, x_m: float, y_m: float, theta_rad: float):
+        try:
+            if self._sim_robot_item is None:
+                return
+            self._sim_robot_item.set_center(QPointF(x_m, y_m))
+            self._sim_robot_item.set_angle_radians(theta_rad)
+        except Exception:
+            pass
+
+    def _toggle_play_pause(self):
+        try:
+            if self._sim_timer.isActive():
+                self._sim_timer.stop()
+                if self._transport_btn is not None:
+                    self._transport_btn.setText("▶")
+            else:
+                # Do not start if no sim data
+                if not self._sim_times_sorted:
+                    return
+                self._sim_timer.start()
+                if self._transport_btn is not None:
+                    self._transport_btn.setText("⏸")
+        except Exception:
+            pass
+
+    def _on_slider_changed(self, value: int):
+        try:
+            # Update current time; if playing, it will be used on next tick
+            self._sim_current_time_s = float(value) / 1000.0
+            self._seek_to_time(self._sim_current_time_s)
+        except Exception:
+            pass
+
+    def _on_slider_pressed(self):
+        try:
+            if self._sim_timer.isActive():
+                self._sim_timer.stop()
+                if self._transport_btn is not None:
+                    self._transport_btn.setText("▶")
+        except Exception:
+            pass
+
+    def _on_slider_released(self):
+        # Do nothing; user can press play to resume
+        pass
+
+    def _seek_to_time(self, t_s: float):
+        try:
+            if not self._sim_times_sorted or not self._sim_poses_by_time:
+                return
+            # Find nearest key at or before t_s; linear scan is fine for now; could use bisect
+            key = 0.0
+            for tk in self._sim_times_sorted:
+                if tk <= t_s:
+                    key = tk
+                else:
+                    break
+            x, y, th = self._sim_poses_by_time.get(key, self._sim_poses_by_time[self._sim_times_sorted[0]])
+            self._set_sim_robot_pose(x, y, th)
+            if self._transport_label is not None:
+                self._transport_label.setText(f"{t_s:.2f} / {self._sim_total_time_s:.2f} s")
+        except Exception:
+            pass
+
+    def _on_sim_tick(self):
+        try:
+            if not self._sim_times_sorted:
+                self._sim_timer.stop()
+                if self._transport_btn is not None:
+                    self._transport_btn.setText("▶")
+                return
+            self._sim_current_time_s += 0.02
+            if self._sim_current_time_s >= self._sim_total_time_s:
+                self._sim_current_time_s = self._sim_total_time_s
+                self._sim_timer.stop()
+                if self._transport_btn is not None:
+                    self._transport_btn.setText("▶")
+            # Update slider and pose
+            if self._transport_slider is not None:
+                self._transport_slider.blockSignals(True)
+                self._transport_slider.setValue(int(round(self._sim_current_time_s * 1000.0)))
+                self._transport_slider.blockSignals(False)
+            self._seek_to_time(self._sim_current_time_s)
+        except Exception:
+            pass
 
 
