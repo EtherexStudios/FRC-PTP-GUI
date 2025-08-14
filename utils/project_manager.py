@@ -301,6 +301,7 @@ class ProjectManager:
                     "rotation_radians": float(elem.rotation_radians),
                     # Represent position along the segment as a ratio in [0,1]
                     "t_ratio": float(getattr(elem, "t_ratio", 0.0)),
+                    "profiled_rotation": bool(getattr(elem, "profiled_rotation", True)),
                 }
                 items.append(d)
             elif isinstance(elem, Waypoint):
@@ -313,8 +314,8 @@ class ProjectManager:
 
                 rd = {
                     "rotation_radians": float(elem.rotation_target.rotation_radians),
-                    # Include ratio for waypoint's rotation target as well
-                    "t_ratio": float(getattr(elem.rotation_target, "t_ratio", 0.0)),
+                    # Note: t_ratio is not included for waypoint rotation targets as they are positioned at the waypoint location
+                    "profiled_rotation": bool(getattr(elem.rotation_target, "profiled_rotation", True)),
                 }
 
                 items.append({
@@ -393,15 +394,18 @@ class ProjectManager:
                 elif typ == "rotation":
                     # New format prefers t_ratio; fall back to legacy x/y if present
                     t_ratio_val = item.get("t_ratio")
+                    profiled_rotation_val = bool(item.get("profiled_rotation", True))
                     if t_ratio_val is not None:
                         el = RotationTarget(
                             rotation_radians=float(item.get("rotation_radians", 0.0)),
                             t_ratio=float(t_ratio_val),
+                            profiled_rotation=profiled_rotation_val,
                         )
                     else:
                         el = RotationTarget(
                             rotation_radians=float(item.get("rotation_radians", 0.0)),
                             t_ratio=0.0,
+                            profiled_rotation=profiled_rotation_val,
                         )
                         # Stash legacy position for a second-pass conversion to t_ratio
                         try:
@@ -415,22 +419,29 @@ class ProjectManager:
                 elif typ == "waypoint":
                     tt = item.get("translation_target", {}) or {}
                     rt = item.get("rotation_target", {}) or {}
-                    # Waypoint rotation target uses t_ratio too (legacy x/y supported)
+                    # Waypoint rotation target: t_ratio is always 0.0 (rotation at waypoint position)
+                    profiled_rotation_val = bool(rt.get("profiled_rotation", True))
                     if "t_ratio" in rt:
+                        # Legacy support: if t_ratio is present, use it but prefer 0.0 for waypoints
                         rot = RotationTarget(
                             rotation_radians=float(rt.get("rotation_radians", 0.0)),
                             t_ratio=float(rt.get("t_ratio", 0.0)),
+                            profiled_rotation=profiled_rotation_val,
                         )
                     else:
+                        # Standard waypoint: rotation at waypoint position (t_ratio = 0.0)
                         rot = RotationTarget(
                             rotation_radians=float(rt.get("rotation_radians", 0.0)),
                             t_ratio=0.0,
+                            profiled_rotation=profiled_rotation_val,
                         )
+                        # Legacy position support for very old formats
                         try:
-                            setattr(rot, "_legacy_pos", (
-                                float(rt.get("x_meters", 0.0)),
-                                float(rt.get("y_meters", 0.0)),
-                            ))
+                            if "x_meters" in rt or "y_meters" in rt:
+                                setattr(rot, "_legacy_pos", (
+                                    float(rt.get("x_meters", 0.0)),
+                                    float(rt.get("y_meters", 0.0)),
+                                ))
                         except Exception:
                             pass
                     el = Waypoint(
@@ -532,10 +543,10 @@ class ProjectManager:
             path1 = Path()
             path1.path_elements.extend([
                 TranslationTarget(x_meters=2.0, y_meters=2.0),
-                RotationTarget(rotation_radians=0.0, t_ratio=0.5),
+                RotationTarget(rotation_radians=0.0, t_ratio=0.5, profiled_rotation=True),
                 Waypoint(
                     translation_target=TranslationTarget(x_meters=6.0, y_meters=4.0),
-                    rotation_target=RotationTarget(rotation_radians=0.5, t_ratio=0.0),
+                    rotation_target=RotationTarget(rotation_radians=0.5, t_ratio=0.0, profiled_rotation=True),
                 ),
                 TranslationTarget(x_meters=10.0, y_meters=6.0),
             ])
@@ -548,7 +559,7 @@ class ProjectManager:
             path2.path_elements.extend([
                 TranslationTarget(x_meters=1.0, y_meters=7.5),
                 TranslationTarget(x_meters=5.0, y_meters=6.0),
-                RotationTarget(rotation_radians=1.2, t_ratio=0.5),
+                RotationTarget(rotation_radians=1.2, t_ratio=0.5, profiled_rotation=True),
                 TranslationTarget(x_meters=12.5, y_meters=3.0),
             ])
             with open(os.path.join(paths_dir, "example_b.json"), "w", encoding="utf-8") as f:

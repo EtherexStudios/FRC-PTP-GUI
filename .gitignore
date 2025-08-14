@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# Qt/PySide build artifacts
+*.qmlc
+*.jsc
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/
+
+# Python env
+.venv/
+env/
+venv/
+
+# Cursor/Editor artifacts
+*.log

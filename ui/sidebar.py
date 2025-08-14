@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QMessageBox
+from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QMessageBox, QCheckBox
 from PySide6.QtWidgets import QListWidget, QListWidgetItem 
 from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
 from PySide6.QtCore import Qt
@@ -142,6 +142,8 @@ class Sidebar(QWidget):
         'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': False, 'section': 'core'}, 
         # Ratio along the segment between previous and next anchors for rotation elements (0..1)
         'rotation_position_ratio': {'label': 'Rotation Pos (0–1)', 'step': 0.01, 'range': (0.0, 1.0), 'removable': False, 'section': 'core'},
+        # Boolean checkbox for profiled rotation
+        'profiled_rotation': {'label': 'Profiled Rotation', 'type': 'checkbox', 'removable': False, 'section': 'core'},
         # Constraints (optional)
         'initial_velocity_meters_per_sec': {'label': 'Initial Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
@@ -347,13 +349,25 @@ class Sidebar(QWidget):
         group_box_spinner_layout.addWidget(self.core_page)
         
         for name, data in self.spinner_metadata.items():
-            spin = QDoubleSpinBox()
-            spin.setSingleStep(data['step'])
-            spin.setRange(*data['range'])
-            spin.setValue(0)
-            spin.setMinimumWidth(96) # Wider for readability
-            spin.setMaximumWidth(200) # Allow expansion when sidebar is wider
-            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            # Create either a checkbox or a spinbox based on the type
+            control_type = data.get('type', 'spinner')
+            if control_type == 'checkbox':
+                control = QCheckBox()
+                control.setChecked(True if name == 'profiled_rotation' else False)
+                control.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                # Connect checkbox to change handler
+                control.toggled.connect(lambda v, n=name: self.on_attribute_change(n, v))
+            else:
+                control = QDoubleSpinBox()
+                control.setSingleStep(data['step'])
+                control.setRange(*data['range'])
+                control.setValue(0)
+                control.setMinimumWidth(96) # Wider for readability
+                control.setMaximumWidth(200) # Allow expansion when sidebar is wider
+                control.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                # Connect spinbox to change handler
+                control.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
+            
             label = QLabel(data['label'])
             # Check if label contains HTML and adjust wrapping accordingly
             if '<br/>' in data['label']:
@@ -367,11 +381,11 @@ class Sidebar(QWidget):
             label.setToolTip(tooltip_text)
             label.setMinimumWidth(120) # Ensure labels have reasonable minimum width
 
-            # Add button next to spinner
+            # Add button next to control
             spin_row = QWidget()
             spin_row_layout = QHBoxLayout(spin_row)
             spin_row_layout.setContentsMargins(0, 0, 0, 0)
-            spin_row_layout.setSpacing(5) # Controls space between spin and btn
+            spin_row_layout.setSpacing(5) # Controls space between control and btn
             spin_row.setMinimumHeight(24)
             spin_row.setMaximumHeight(24)
 
@@ -390,14 +404,10 @@ class Sidebar(QWidget):
                 btn.setEnabled(False) # Make non-removable buttons non-interactive
 
             spin_row_layout.addStretch() # Push widgets to the right
-            spin_row_layout.addWidget(spin)
+            spin_row_layout.addWidget(control)
             spin_row_layout.addWidget(btn)
             # Make the spin row expand to fill available width
             spin_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-            # FIX: capture 'name' as a default argument in the lambda
-            # For path constraints, this will update Path.constraints
-            spin.valueChanged.connect(lambda v, n=name: self.on_attribute_change(n, v))
 
             # Add to the appropriate section based on metadata
             section = data.get('section', 'core')
@@ -407,7 +417,7 @@ class Sidebar(QWidget):
                 self.constraints_layout.addRow(label, spin_row)
             else:
                 self.core_layout.addRow(label, spin_row)
-            self.spinners[name] = (spin, label, btn, spin_row)
+            self.spinners[name] = (control, label, btn, spin_row)
 
         # Stretch to consume remaining vertical space
         group_box_spinner_layout.addStretch(1)
@@ -525,12 +535,19 @@ class Sidebar(QWidget):
         def show_attr(attr_owner, name, convert_deg=False):
             if name not in self.spinners:
                 return False
-            spin, label, btn, spin_row = self.spinners[name]
+            control, label, btn, spin_row = self.spinners[name]
             if hasattr(attr_owner, name):
                 value = getattr(attr_owner, name)
                 if value is not None:
-                    shown = math.degrees(value) if convert_deg else value
-                    spin.setValue(shown)
+                    try:
+                        control.blockSignals(True)
+                        if isinstance(control, QCheckBox):
+                            control.setChecked(bool(value))
+                        else:
+                            shown = math.degrees(value) if convert_deg else value
+                            control.setValue(shown)
+                    finally:
+                        control.blockSignals(False)
                     label.setVisible(True)
                     spin_row.setVisible(True)
                     return True
@@ -547,18 +564,26 @@ class Sidebar(QWidget):
             model_attr = Sidebar.degrees_to_radians_attr_map.get(deg_name)
             if not model_attr:
                 return False
-            spin, label, btn, spin_row = self.spinners[deg_name]
+            control, label, btn, spin_row = self.spinners[deg_name]
             if hasattr(owner, model_attr):
                 value = getattr(owner, model_attr)
                 if value is not None:
-                    spin.setValue(math.degrees(value))
+                    try:
+                        control.blockSignals(True)
+                        control.setValue(math.degrees(value))
+                    finally:
+                        control.blockSignals(False)
                     label.setVisible(True)
                     spin_row.setVisible(True)
                     return True
                 else:
                     # Only force-show default for rotation_degrees; for limits queue as optional
                     if deg_name == 'rotation_degrees':
-                        spin.setValue(0.0)
+                        try:
+                            control.blockSignals(True)
+                            control.setValue(0.0)
+                        finally:
+                            control.blockSignals(False)
                         label.setVisible(True)
                         spin_row.setVisible(True)
                         return True
@@ -570,7 +595,7 @@ class Sidebar(QWidget):
 
         # Decide which owners contribute which fields
         # First hide all rows; we'll only show those that are present/selected
-        for name, (spin, label, btn, spin_row) in self.spinners.items():
+        for name, (control, label, btn, spin_row) in self.spinners.items():
             label.setVisible(False)
             spin_row.setVisible(False)
         # Core: position always from translation_target if Waypoint, else from element
@@ -580,15 +605,17 @@ class Sidebar(QWidget):
             show_attr(element.translation_target, 'y_meters')
             # Rotation degrees from rotation_target
             show_deg_attr(element.rotation_target, 'rotation_degrees')
+            # Profiled rotation from rotation_target
+            show_attr(element.rotation_target, 'profiled_rotation')
             # Core handoff radius (force-visible for Waypoints)
             if 'intermediate_handoff_radius_meters' in self.spinners:
-                spin, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
+                control, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
                 val = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
                 try:
-                    spin.blockSignals(True)
-                    spin.setValue(float(val) if val is not None else 0.0)
+                    control.blockSignals(True)
+                    control.setValue(float(val) if val is not None else 0.0)
                 finally:
-                    spin.blockSignals(False)
+                    control.blockSignals(False)
                 label.setVisible(True)
                 spin_row.setVisible(True)
         elif isinstance(element, TranslationTarget):
@@ -596,25 +623,27 @@ class Sidebar(QWidget):
             show_attr(element, 'y_meters')
             # Core handoff radius for TranslationTarget
             if 'intermediate_handoff_radius_meters' in self.spinners:
-                spin, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
+                control, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
                 val = getattr(element, 'intermediate_handoff_radius_meters', None)
                 try:
-                    spin.blockSignals(True)
-                    spin.setValue(float(val) if val is not None else 0.0)
+                    control.blockSignals(True)
+                    control.setValue(float(val) if val is not None else 0.0)
                 finally:
-                    spin.blockSignals(False)
+                    control.blockSignals(False)
                 label.setVisible(True)
                 spin_row.setVisible(True)
         elif isinstance(element, RotationTarget):
             show_deg_attr(element, 'rotation_degrees')
+            # Profiled rotation
+            show_attr(element, 'profiled_rotation')
             # Show rotation position ratio (0..1)
             if 'rotation_position_ratio' in self.spinners:
-                spin, label, btn, spin_row = self.spinners['rotation_position_ratio']
+                control, label, btn, spin_row = self.spinners['rotation_position_ratio']
                 try:
-                    spin.blockSignals(True)
-                    spin.setValue(float(getattr(element, 't_ratio', 0.0)))
+                    control.blockSignals(True)
+                    control.setValue(float(getattr(element, 't_ratio', 0.0)))
                 finally:
-                    spin.blockSignals(False)
+                    control.blockSignals(False)
                 label.setVisible(True)
                 spin_row.setVisible(True)
 
@@ -631,12 +660,15 @@ class Sidebar(QWidget):
                 if hasattr(c, name):
                     val = getattr(c, name)
                     if val is not None and name in self.spinners:
-                        spin, label, btn, spin_row = self.spinners[name]
+                        control, label, btn, spin_row = self.spinners[name]
                         try:
-                            spin.blockSignals(True)
-                            spin.setValue(float(val))
+                            control.blockSignals(True)
+                            if isinstance(control, QCheckBox):
+                                control.setChecked(bool(val))
+                            else:
+                                control.setValue(float(val))
                         finally:
-                            spin.blockSignals(False)
+                            control.blockSignals(False)
                         label.setVisible(True)
                         spin_row.setVisible(True)
                         has_constraints = True
@@ -649,12 +681,15 @@ class Sidebar(QWidget):
                 if hasattr(c, name):
                     val = getattr(c, name)
                     if val is not None and name in self.spinners:
-                        spin, label, btn, spin_row = self.spinners[name]
+                        control, label, btn, spin_row = self.spinners[name]
                         try:
-                            spin.blockSignals(True)
-                            spin.setValue(float(val))
+                            control.blockSignals(True)
+                            if isinstance(control, QCheckBox):
+                                control.setChecked(bool(val))
+                            else:
+                                control.setValue(float(val))
                         finally:
-                            spin.blockSignals(False)
+                            control.blockSignals(False)
                         label.setVisible(True)
                         spin_row.setVisible(True)
                         has_constraints = True
@@ -677,55 +712,63 @@ class Sidebar(QWidget):
         if idx is None or self.path is None:
             return
         element = self.path.get_element(idx)
-        # Helper to set a spin value safely
-        def set_spin_value(name: str, value: float):
+        # Helper to set a control value safely
+        def set_control_value(name: str, value):
             if name not in self.spinners:
                 return
-            spin, _, _, _ = self.spinners[name]
-            if not spin.isVisible():
+            control, _, _, _ = self.spinners[name]
+            if not control.isVisible():
                 return
             try:
-                spin.blockSignals(True)
-                spin.setValue(value)
+                control.blockSignals(True)
+                if isinstance(control, QCheckBox):
+                    control.setChecked(bool(value))
+                else:
+                    control.setValue(float(value))
             finally:
-                spin.blockSignals(False)
+                control.blockSignals(False)
 
         # Update position
         if isinstance(element, Waypoint):
-            set_spin_value('x_meters', element.translation_target.x_meters)
-            set_spin_value('y_meters', element.translation_target.y_meters)
+            set_control_value('x_meters', element.translation_target.x_meters)
+            set_control_value('y_meters', element.translation_target.y_meters)
             # rotation degrees
             if element.rotation_target.rotation_radians is not None:
-                set_spin_value('rotation_degrees', math.degrees(element.rotation_target.rotation_radians))
+                set_control_value('rotation_degrees', math.degrees(element.rotation_target.rotation_radians))
+            # profiled rotation
+            set_control_value('profiled_rotation', getattr(element.rotation_target, 'profiled_rotation', True))
             # core handoff radius
             if hasattr(element.translation_target, 'intermediate_handoff_radius_meters') and element.translation_target.intermediate_handoff_radius_meters is not None:
-                set_spin_value('intermediate_handoff_radius_meters', float(element.translation_target.intermediate_handoff_radius_meters))
+                set_control_value('intermediate_handoff_radius_meters', float(element.translation_target.intermediate_handoff_radius_meters))
         elif isinstance(element, TranslationTarget):
-            set_spin_value('x_meters', element.x_meters)
-            set_spin_value('y_meters', element.y_meters)
+            set_control_value('x_meters', element.x_meters)
+            set_control_value('y_meters', element.y_meters)
             # core handoff radius
             if hasattr(element, 'intermediate_handoff_radius_meters') and element.intermediate_handoff_radius_meters is not None:
-                set_spin_value('intermediate_handoff_radius_meters', float(element.intermediate_handoff_radius_meters))
+                set_control_value('intermediate_handoff_radius_meters', float(element.intermediate_handoff_radius_meters))
         elif isinstance(element, RotationTarget):
             if element.rotation_radians is not None:
-                set_spin_value('rotation_degrees', math.degrees(element.rotation_radians))
-            set_spin_value('rotation_position_ratio', float(getattr(element, 't_ratio', 0.0)))
+                set_control_value('rotation_degrees', math.degrees(element.rotation_radians))
+            # profiled rotation
+            set_control_value('profiled_rotation', getattr(element, 'profiled_rotation', True))
+            set_control_value('rotation_position_ratio', float(getattr(element, 't_ratio', 0.0)))
         # For waypoints, also reflect rotation ratio from the embedded rotation_target
         if isinstance(element, Waypoint):
-            set_spin_value('rotation_position_ratio', float(getattr(element.rotation_target, 't_ratio', 0.0)))
+            set_control_value('rotation_position_ratio', float(getattr(element.rotation_target, 't_ratio', 0.0)))
 
     def _refresh_spinner_metadata_bounds(self):
         # If needed in the future: dynamically adjust ranges from config. For now, keep static.
         # Hook to refresh UI on config change.
-        for name, (spin, label, btn, spin_row) in self.spinners.items():
+        for name, (control, label, btn, spin_row) in self.spinners.items():
             meta = self.spinner_metadata.get(name, {})
             rng = meta.get('range')
             if rng and isinstance(rng, tuple) and len(rng) == 2:
                 try:
-                    spin.blockSignals(True)
-                    spin.setRange(float(rng[0]), float(rng[1]))
+                    control.blockSignals(True)
+                    if hasattr(control, 'setRange'):  # Only for spinboxes, not checkboxes
+                        control.setRange(float(rng[0]), float(rng[1]))
                 finally:
-                    spin.blockSignals(False)
+                    control.blockSignals(False)
 
     # Removed toolbox-related helpers after layout refactor
 
@@ -926,6 +969,7 @@ class Sidebar(QWidget):
                 new_elem = RotationTarget(
                     rotation_radians=rotation_values['rotation_radians'] if rotation_values['rotation_radians'] else 0.0,
                     t_ratio=rotation_values['t_ratio'] if rotation_values['t_ratio'] is not None else 0.5,
+                    profiled_rotation=True,
                 )
             elif new_type == ElementType.TRANSLATION:
                 # If converting from a RotationTarget, place the new translation at the
@@ -1114,7 +1158,15 @@ class Sidebar(QWidget):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
                         setattr(self.path.constraints, key, clamped)
                 else:
-                    if isinstance(element, Waypoint):
+                    if key == 'profiled_rotation':
+                        # Handle profiled_rotation specifically for rotation targets
+                        if isinstance(element, Waypoint):
+                            if hasattr(element.rotation_target, key):
+                                setattr(element.rotation_target, key, bool(value))
+                        elif isinstance(element, RotationTarget):
+                            if hasattr(element, key):
+                                setattr(element, key, bool(value))
+                    elif isinstance(element, Waypoint):
                         if hasattr(element.translation_target, key):
                             clamped = Sidebar._clamp_from_metadata(key, float(value))
                             setattr(element.translation_target, key, clamped)
@@ -1298,11 +1350,11 @@ class Sidebar(QWidget):
         elif new_type == ElementType.WAYPOINT:
             tt = TranslationTarget(x_meters=x0, y_meters=y0)
             # Start waypoint's rotation at same position (ratio 0.0 by default)
-            rt = RotationTarget(rotation_radians=0.0, t_ratio=0.0)
+            rt = RotationTarget(rotation_radians=0.0, t_ratio=0.0, profiled_rotation=True)
             new_elem = Waypoint(translation_target=tt, rotation_target=rt)
         else:  # ROTATION
             # Create rotation with default ratio; will be adjusted to midpoint below
-            new_elem = RotationTarget(rotation_radians=0.0, t_ratio=0.5)
+            new_elem = RotationTarget(rotation_radians=0.0, t_ratio=0.5, profiled_rotation=True)
         # Insert and then fix constraints/positions
         self.path.path_elements.insert(insert_pos, new_elem)
         # If we inserted a rotation, snap it to midpoint between neighbors

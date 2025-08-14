@@ -28,6 +28,7 @@ class RotationTarget(PathElement):
     # previous and next anchor elements (TranslationTarget or Waypoint).
     # 0.0 corresponds to the previous anchor, 1.0 to the next anchor.
     t_ratio: float = 0.0
+    profiled_rotation: bool = True
 
 @dataclass
 class Waypoint(PathElement):
