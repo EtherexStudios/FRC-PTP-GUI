@@ -1,24 +1,20 @@
 {
   "project": "FRC-PTP-GUI",
-  "description": "Python GUI for FRC path planning",
+  "description": "Python GUI for FRC path planning and trajectory optimization using PySide6",
   "files": [
     "python:main.py",
     "python:ui/main_window.py",
     "python:ui/sidebar.py",
     "python:ui/config_dialog.py",
     "python:ui/canvas.py",
+    "python:models/path_model.py",
     "python:utils/temp.py",
     "python:utils/project_manager.py",
-    "python:models/path_model.py",
-    "python:grok/gather_for_grok_simple.py",
     "example:config.json",
     "example:README.md",
-    "example:paths/new simple.json",
-    "example:paths/bllll.json",
-    "example:paths/simple_path.json",
-    "example:paths/sdofij.json",
-    "example:paths/our path.json",
-    "example:paths/untitled.json"
+    "example:paths/example_b.json",
+    "example:paths/example_a.json"
   ],
-  "total_files": 17
+  "total_files": 12,
+  "timestamp": "/Users/edan/FRC/FRC-PTP-GUI/grok_simple.txt"
 }

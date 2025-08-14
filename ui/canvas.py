@@ -498,7 +498,7 @@ class CanvasView(QGraphicsView):
                 continue
                 
             element = self._path.path_elements[i]
-            pos = self._element_position(element)
+            pos = self._element_position_for_index(i)
             
             # Skip rotation elements - they never get handoff radius visualizers
             if kind == 'rotation':
@@ -562,7 +562,7 @@ class CanvasView(QGraphicsView):
                     except RuntimeError:
                         continue
                     element = self._path.path_elements[i]
-                    pos = self._element_position(element)
+                    pos = self._element_position_for_index(i)
                     item.set_center(QPointF(pos[0], pos[1]))
                     
                     # Update handoff radius visualizer if it exists
@@ -623,7 +623,7 @@ class CanvasView(QGraphicsView):
                 continue
             try:
                 element = self._path.path_elements[i]
-                pos = self._element_position(element)
+                pos = self._element_position_for_index(i)
                 item.set_center(QPointF(pos[0], pos[1]))
                 if handle is not None:
                     angle = self._element_rotation(element)
@@ -739,7 +739,7 @@ class CanvasView(QGraphicsView):
             return
 
         for i, element in enumerate(self._path.path_elements):
-            pos = self._element_position(element)
+            pos = self._element_position_for_index(i)
 
             # Choose visuals by element type
             if isinstance(element, TranslationTarget):
@@ -868,14 +868,54 @@ class CanvasView(QGraphicsView):
                 return self._element_rotation(elem)
         return 0.0
 
-    def _element_position(self, element: PathElement) -> Tuple[float, float]:
+    def _element_position_for_index(self, index: int) -> Tuple[float, float]:
+        if self._path is None or index < 0 or index >= len(self._path.path_elements):
+            return 0.0, 0.0
+        element = self._path.path_elements[index]
         if isinstance(element, TranslationTarget):
-            return float(element.x_meters), float(element.y_meters)
-        if isinstance(element, RotationTarget):
             return float(element.x_meters), float(element.y_meters)
         if isinstance(element, Waypoint):
             return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+        if isinstance(element, RotationTarget):
+            # Compute position along the segment defined by neighbors using t_ratio
+            prev_pos, next_pos = self._neighbor_positions_model(index)
+            if prev_pos is None or next_pos is None:
+                return 0.0, 0.0
+            ax, ay = prev_pos
+            bx, by = next_pos
+            t = float(getattr(element, "t_ratio", 0.0))
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            return ax + t * (bx - ax), ay + t * (by - ay)
         return 0.0, 0.0
+
+    def _neighbor_positions_model(self, index: int) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+        """Find the model positions of the previous and next anchor elements (TranslationTarget or Waypoint)."""
+        if self._path is None:
+            return None, None
+        # prev
+        prev_pos = None
+        for i in range(index - 1, -1, -1):
+            e = self._path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                prev_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                prev_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        # next
+        next_pos = None
+        for i in range(index + 1, len(self._path.path_elements)):
+            e = self._path.path_elements[i]
+            if isinstance(e, TranslationTarget):
+                next_pos = (float(e.x_meters), float(e.y_meters))
+                break
+            if isinstance(e, Waypoint):
+                next_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                break
+        return prev_pos, next_pos
 
     def _element_rotation(self, element: PathElement) -> float:
         if isinstance(element, RotationTarget):
@@ -1050,49 +1090,39 @@ class CanvasView(QGraphicsView):
         return prev_pos, next_pos
 
     def _reproject_rotation_items_in_scene(self):
-        # Adjust rotation items to lie on the segment between their current visible neighbors
-        # Maintain the initial t ratio along the segment during an anchor drag
+        # Position rotation items strictly according to their model t_ratio and current anchor positions
         self._suppress_live_events = True
         try:
             for i, (kind, item, handle) in enumerate(self._items):
                 if kind != 'rotation':
                     continue
+                # Determine anchor positions from current scene items
                 prev_pos, next_pos = self._find_neighbor_item_positions(i)
                 if prev_pos is None or next_pos is None:
-                    # Skip rotation items without valid neighbors
                     continue
                 ax, ay = prev_pos
                 bx, by = next_pos
-                dx = bx - ax
-                dy = by - ay
-                denom = dx * dx + dy * dy
-                if denom <= 0.0:
-                    # Skip if neighbors are at the same position
-                    continue
-                # Use cached t if available to maintain ratio; otherwise compute from current scene position
-                if self._rotation_t_cache is not None and i in self._rotation_t_cache:
-                    t = self._rotation_t_cache[i]
-                else:
-                    # Use current scene position for t calculation to ensure accurate positioning
-                    try:
-                        rx, ry = item.pos().x(), item.pos().y()
-                    except (AttributeError, TypeError):
-                        continue
-                    t = ((rx - ax) * dx + (ry - ay) * dy) / denom
-                    if t < 0.0:
-                        t = 0.0
-                    elif t > 1.0:
-                        t = 1.0
-                proj_x = ax + t * dx
-                proj_y = ay + t * dy
-                # Move without emitting signals
+                # Read t_ratio from model
+                t = 0.0
+                try:
+                    if self._path is not None and i < len(self._path.path_elements):
+                        rt = self._path.path_elements[i]
+                        if isinstance(rt, RotationTarget):
+                            t = float(getattr(rt, 't_ratio', 0.0))
+                except Exception:
+                    t = 0.0
+                if t < 0.0:
+                    t = 0.0
+                elif t > 1.0:
+                    t = 1.0
+                proj_x = ax + t * (bx - ax)
+                proj_y = ay + t * (by - ay)
                 try:
                     item.setPos(proj_x, proj_y)
                     if handle is not None:
                         handle.sync_to_angle()
                 except (AttributeError, TypeError):
                     continue
-            # Update connecting lines once after all moves
             self._update_connecting_lines()
         finally:
             self._suppress_live_events = False

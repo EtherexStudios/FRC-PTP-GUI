@@ -140,6 +140,8 @@ class Sidebar(QWidget):
         'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0.0, float(FIELD_WIDTH_METERS)), 'removable': False, 'section': 'core'},
         # Handoff radius is a core control for TranslationTarget and Waypoint
         'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 5), 'removable': False, 'section': 'core'}, 
+        # Ratio along the segment between previous and next anchors for rotation elements (0..1)
+        'rotation_position_ratio': {'label': 'Rotation Pos (0–1)', 'step': 0.01, 'range': (0.0, 1.0), 'removable': False, 'section': 'core'},
         # Constraints (optional)
         'initial_velocity_meters_per_sec': {'label': 'Initial Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
         'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 15), 'removable': True, 'section': 'constraints'},
@@ -604,9 +606,17 @@ class Sidebar(QWidget):
                 label.setVisible(True)
                 spin_row.setVisible(True)
         elif isinstance(element, RotationTarget):
-            show_attr(element, 'x_meters')
-            show_attr(element, 'y_meters')
             show_deg_attr(element, 'rotation_degrees')
+            # Show rotation position ratio (0..1)
+            if 'rotation_position_ratio' in self.spinners:
+                spin, label, btn, spin_row = self.spinners['rotation_position_ratio']
+                try:
+                    spin.blockSignals(True)
+                    spin.setValue(float(getattr(element, 't_ratio', 0.0)))
+                finally:
+                    spin.blockSignals(False)
+                label.setVisible(True)
+                spin_row.setVisible(True)
 
         # Path-level constraints panel
         # Build options list and show present constraints
@@ -697,10 +707,12 @@ class Sidebar(QWidget):
             if hasattr(element, 'intermediate_handoff_radius_meters') and element.intermediate_handoff_radius_meters is not None:
                 set_spin_value('intermediate_handoff_radius_meters', float(element.intermediate_handoff_radius_meters))
         elif isinstance(element, RotationTarget):
-            set_spin_value('x_meters', element.x_meters)
-            set_spin_value('y_meters', element.y_meters)
             if element.rotation_radians is not None:
                 set_spin_value('rotation_degrees', math.degrees(element.rotation_radians))
+            set_spin_value('rotation_position_ratio', float(getattr(element, 't_ratio', 0.0)))
+        # For waypoints, also reflect rotation ratio from the embedded rotation_target
+        if isinstance(element, Waypoint):
+            set_spin_value('rotation_position_ratio', float(getattr(element.rotation_target, 't_ratio', 0.0)))
 
     def _refresh_spinner_metadata_bounds(self):
         # If needed in the future: dynamically adjust ranges from config. For now, keep static.
@@ -899,8 +911,7 @@ class Sidebar(QWidget):
             ]
             rotation_attrs = [
                 'rotation_radians',
-                'x_meters',
-                'y_meters'
+                't_ratio',
             ]
 
             translation_values = {attr: getattr(prev, attr, None) for attr in translation_attrs}
@@ -913,38 +924,62 @@ class Sidebar(QWidget):
                 )
             elif new_type == ElementType.ROTATION:
                 new_elem = RotationTarget(
-                    rotation_values['rotation_radians'] if rotation_values['rotation_radians'] else 0,
-                    rotation_values['x_meters'] if rotation_values['x_meters'] else 0.0,
-                    rotation_values['y_meters'] if rotation_values['y_meters'] else 0.0,
+                    rotation_radians=rotation_values['rotation_radians'] if rotation_values['rotation_radians'] else 0.0,
+                    t_ratio=rotation_values['t_ratio'] if rotation_values['t_ratio'] is not None else 0.5,
                 )
             elif new_type == ElementType.TRANSLATION:
+                # If converting from a RotationTarget, place the new translation at the
+                # rotation's implied position (by t_ratio along neighbors)
+                if prev_type == ElementType.ROTATION:
+                    # Compute implied position from neighbors
+                    prev_pos, next_pos = self._neighbor_positions_model(idx)
+                    if prev_pos is not None and next_pos is not None:
+                        ax, ay = prev_pos
+                        bx, by = next_pos
+                        try:
+                            t = float(getattr(prev, 't_ratio', 0.0))
+                        except Exception:
+                            t = 0.0
+                        x_new = ax + t * (bx - ax)
+                        y_new = ay + t * (by - ay)
+                    else:
+                        x_new = float(translation_values['x_meters'] or 0.0)
+                        y_new = float(translation_values['y_meters'] or 0.0)
+                else:
+                    x_new = float(translation_values['x_meters'] or 0.0)
+                    y_new = float(translation_values['y_meters'] or 0.0)
                 new_elem = TranslationTarget(
-                    translation_values['x_meters'] if translation_values['x_meters'] else 0.0,
-                    translation_values['y_meters'] if translation_values['y_meters'] else 0.0,
+                    x_new,
+                    y_new,
                     translation_values['intermediate_handoff_radius_meters']
                 )
             elif new_type == ElementType.WAYPOINT:
                 if prev_type == ElementType.TRANSLATION:
                     new_elem = Waypoint(translation_target=prev)
-                    new_elem.rotation_target.x_meters = new_elem.translation_target.x_meters
-                    new_elem.rotation_target.y_meters = new_elem.translation_target.y_meters
+                    # keep rotation ratio default at 0.0
                 else:
-                    new_elem = Waypoint(rotation_target=prev)
-                    new_elem.translation_target.x_meters = new_elem.rotation_target.x_meters
-                    new_elem.translation_target.y_meters = new_elem.rotation_target.y_meters
+                    # prev is RotationTarget; create a waypoint at the rotation's implied position
+                    # translation at implied pos, rotation retains its angle and t_ratio
+                    prev_pos, next_pos = self._neighbor_positions_model(idx)
+                    if prev_pos is not None and next_pos is not None:
+                        ax, ay = prev_pos
+                        bx, by = next_pos
+                        try:
+                            t = float(getattr(prev, 't_ratio', 0.0))
+                        except Exception:
+                            t = 0.0
+                        x_new = ax + t * (bx - ax)
+                        y_new = ay + t * (by - ay)
+                    else:
+                        x_new, y_new = 0.0, 0.0
+                    tt = TranslationTarget(x_meters=x_new, y_meters=y_new)
+                    new_elem = Waypoint(rotation_target=prev, translation_target=tt)
 
             # If we have just created or switched to a rotation element, snap its x/y to closest point on line between neighbors
             if new_type == ElementType.ROTATION:
-                # Update the model first so _project_point_between_neighbors can find the correct neighbors
+                # Update the model first so neighbor calculations work
                 self.path.path_elements[idx] = new_elem
-                # Project the current position onto the line between neighbors
-                proj_x, proj_y = self._project_point_between_neighbors(idx, new_elem.x_meters, new_elem.y_meters)
-                new_elem.x_meters = proj_x
-                new_elem.y_meters = proj_y
-                # Update the model again with the corrected coordinates
-                self.path.path_elements[idx] = new_elem
-                
-                # Check if we need to swap rotation targets to maintain visual order
+                # Ensure rotations order by t_ratio
                 self._check_and_swap_rotation_targets()
             else:
                 # For non-rotation elements, just update the model
@@ -1025,12 +1060,8 @@ class Sidebar(QWidget):
         return (ax + bx) / 2.0, (ay + by) / 2.0
 
     def _reproject_all_rotation_positions(self):
-        if self.path is None:
-            return
-        for idx, e in enumerate(self.path.path_elements):
-            if isinstance(e, RotationTarget):
-                proj_x, proj_y = self._project_point_between_neighbors(idx, e.x_meters, e.y_meters)
-                e.x_meters, e.y_meters = proj_x, proj_y
+        # No model updates required. Canvas derives rotation positions from t_ratio.
+        return
 
     # Removed unused getattr_deep helper for cleanliness
 
@@ -1039,6 +1070,19 @@ class Sidebar(QWidget):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
             element = self.path.get_element(idx)
+            # Handle rotation position ratio updates
+            if key == 'rotation_position_ratio':
+                clamped_ratio = Sidebar._clamp_from_metadata(key, float(value))
+                if isinstance(element, Waypoint):
+                    try:
+                        element.rotation_target.t_ratio = float(clamped_ratio)
+                    except Exception:
+                        pass
+                elif isinstance(element, RotationTarget):
+                    element.t_ratio = float(clamped_ratio)
+                # No re-projection needed; canvas computes from ratio
+                self.modelChanged.emit()
+                return
             if key in Sidebar.degrees_to_radians_attr_map:
                 # Degrees-mapped keys only apply to rotation_degrees on element; other deg constraints are path-level
                 mapped = Sidebar.degrees_to_radians_attr_map[key]
@@ -1077,23 +1121,11 @@ class Sidebar(QWidget):
                             # Reproject all rotation targets since endpoints changed
                             self._reproject_all_rotation_positions()
                     elif hasattr(element, key):
-                        if isinstance(element, RotationTarget) and key in ('x_meters', 'y_meters'):
-                            # Project rotation element onto segment between neighbors; adjust both x and y
-                            desired_x = float(value) if key == 'x_meters' else float(element.x_meters)
-                            desired_y = float(value) if key == 'y_meters' else float(element.y_meters)
-                            desired_x = Sidebar._clamp_from_metadata('x_meters', desired_x)
-                            desired_y = Sidebar._clamp_from_metadata('y_meters', desired_y)
-                            proj_x, proj_y = self._project_point_between_neighbors(idx, desired_x, desired_y)
-                            element.x_meters = proj_x
-                            element.y_meters = proj_y
-                            # Keep the UI in sync immediately
-                            self.update_current_values_only()
-                        else:
-                            clamped = Sidebar._clamp_from_metadata(key, float(value))
-                            setattr(element, key, clamped)
-                            # If a translation target moved, reproject rotations
-                            if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
-                                self._reproject_all_rotation_positions()
+                        clamped = Sidebar._clamp_from_metadata(key, float(value))
+                        setattr(element, key, clamped)
+                        # If a translation target moved, reproject rotations
+                        if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
+                            self._reproject_all_rotation_positions()
             self.modelChanged.emit()
 
     def rebuild_points_list(self):
@@ -1251,26 +1283,32 @@ class Sidebar(QWidget):
             if isinstance(e, Waypoint):
                 return float(e.translation_target.x_meters), float(e.translation_target.y_meters)
             if isinstance(e, RotationTarget):
-                return float(e.x_meters), float(e.y_meters)
+                # For rotations, compute midpoint between neighbors
+                # Sidebar-only utility for default placement decisions
+                prev_pos, next_pos = self._neighbor_positions_model(idx)
+                if prev_pos is None or next_pos is None:
+                    return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
+                ax, ay = prev_pos
+                bx, by = next_pos
+                return (ax + bx) / 2.0, (ay + by) / 2.0
             return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
         x0, y0 = current_pos_defaults()
         if new_type == ElementType.TRANSLATION:
             new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
         elif new_type == ElementType.WAYPOINT:
             tt = TranslationTarget(x_meters=x0, y_meters=y0)
-            rt = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+            # Start waypoint's rotation at same position (ratio 0.0 by default)
+            rt = RotationTarget(rotation_radians=0.0, t_ratio=0.0)
             new_elem = Waypoint(translation_target=tt, rotation_target=rt)
         else:  # ROTATION
-            new_elem = RotationTarget(rotation_radians=0.0, x_meters=x0, y_meters=y0)
+            # Create rotation with default ratio; will be adjusted to midpoint below
+            new_elem = RotationTarget(rotation_radians=0.0, t_ratio=0.5)
         # Insert and then fix constraints/positions
         self.path.path_elements.insert(insert_pos, new_elem)
         # If we inserted a rotation, snap it to midpoint between neighbors
         if isinstance(new_elem, RotationTarget):
-            mid = self._midpoint_between_neighbors(insert_pos)
-            if mid is not None:
-                mx, my = mid
-                new_elem.x_meters = mx
-                new_elem.y_meters = my
+            # Set initial ratio to midpoint
+            new_elem.t_ratio = 0.5
         # After any insert, ensure rotations are not at ends; if they are, swap inward with nearest non-rotation
         self._repair_rotation_at_ends()
         # Reproject rotation positions
@@ -1353,8 +1391,7 @@ class Sidebar(QWidget):
             if isinstance(el, Waypoint):
                 tt = el.translation_target
                 return float(tt.x_meters), float(tt.y_meters)
-            if isinstance(el, RotationTarget):
-                return float(el.x_meters), float(el.y_meters)
+            # Rotation positions are implicit via t_ratio
             return None
 
         # Collect indices of anchor elements (translation targets and waypoints)
@@ -1374,25 +1411,11 @@ class Sidebar(QWidget):
             if len(between_indices) < 2:
                 continue  # nothing to reorder for this segment
 
-            # Anchor positions and vector
-            ax, ay = _pos(elems[start_idx])
-            bx, by = _pos(elems[end_idx])
-            dx = bx - ax
-            dy = by - ay
-            denom = dx * dx + dy * dy
-            if denom == 0:
-                continue  # degenerate segment – skip
-
-            # Compute parametric t for each rotation (projection onto AB, clamped to [0,1])
-            rot_t_pairs = []  # (index, t)
-            for j in between_indices:
-                rx, ry = _pos(elems[j])
-                t = ((rx - ax) * dx + (ry - ay) * dy) / denom
-                rot_t_pairs.append((j, t))
-
-            # Desired order based on increasing t
-            rot_t_pairs.sort(key=lambda p: p[1])
-            desired_order = [idx for idx, _ in rot_t_pairs]
+            # Desired order based on each rotation element's t_ratio
+            try:
+                desired_order = sorted(between_indices, key=lambda j: float(getattr(elems[j], 't_ratio', 0.0)))
+            except Exception:
+                desired_order = between_indices[:]
 
             # Current order (model list order) is just between_indices
             if between_indices == desired_order:

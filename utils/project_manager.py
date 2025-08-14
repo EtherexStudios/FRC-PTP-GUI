@@ -299,8 +299,8 @@ class ProjectManager:
                 d = {
                     "type": "rotation",
                     "rotation_radians": float(elem.rotation_radians),
-                    "x_meters": float(elem.x_meters),
-                    "y_meters": float(elem.y_meters),
+                    # Represent position along the segment as a ratio in [0,1]
+                    "t_ratio": float(getattr(elem, "t_ratio", 0.0)),
                 }
                 items.append(d)
             elif isinstance(elem, Waypoint):
@@ -313,8 +313,8 @@ class ProjectManager:
 
                 rd = {
                     "rotation_radians": float(elem.rotation_target.rotation_radians),
-                    "x_meters": float(elem.rotation_target.x_meters),
-                    "y_meters": float(elem.rotation_target.y_meters),
+                    # Include ratio for waypoint's rotation target as well
+                    "t_ratio": float(getattr(elem.rotation_target, "t_ratio", 0.0)),
                 }
 
                 items.append({
@@ -377,6 +377,7 @@ class ProjectManager:
                         setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))
             items = data.get("path_elements", []) if isinstance(data.get("path_elements", []), list) else []
         # Load path elements
+        # First pass: create elements (support both new and legacy formats)
         for item in items:
             try:
                 if not isinstance(item, dict):
@@ -390,26 +391,55 @@ class ProjectManager:
                     )
                     path.path_elements.append(el)
                 elif typ == "rotation":
-                    el = RotationTarget(
-                        rotation_radians=float(item.get("rotation_radians", 0.0)),
-                        x_meters=float(item.get("x_meters", 0.0)),
-                        y_meters=float(item.get("y_meters", 0.0)),
-                    )
+                    # New format prefers t_ratio; fall back to legacy x/y if present
+                    t_ratio_val = item.get("t_ratio")
+                    if t_ratio_val is not None:
+                        el = RotationTarget(
+                            rotation_radians=float(item.get("rotation_radians", 0.0)),
+                            t_ratio=float(t_ratio_val),
+                        )
+                    else:
+                        el = RotationTarget(
+                            rotation_radians=float(item.get("rotation_radians", 0.0)),
+                            t_ratio=0.0,
+                        )
+                        # Stash legacy position for a second-pass conversion to t_ratio
+                        try:
+                            setattr(el, "_legacy_pos", (
+                                float(item.get("x_meters", 0.0)),
+                                float(item.get("y_meters", 0.0)),
+                            ))
+                        except Exception:
+                            pass
                     path.path_elements.append(el)
                 elif typ == "waypoint":
                     tt = item.get("translation_target", {}) or {}
                     rt = item.get("rotation_target", {}) or {}
+                    # Waypoint rotation target uses t_ratio too (legacy x/y supported)
+                    if "t_ratio" in rt:
+                        rot = RotationTarget(
+                            rotation_radians=float(rt.get("rotation_radians", 0.0)),
+                            t_ratio=float(rt.get("t_ratio", 0.0)),
+                        )
+                    else:
+                        rot = RotationTarget(
+                            rotation_radians=float(rt.get("rotation_radians", 0.0)),
+                            t_ratio=0.0,
+                        )
+                        try:
+                            setattr(rot, "_legacy_pos", (
+                                float(rt.get("x_meters", 0.0)),
+                                float(rt.get("y_meters", 0.0)),
+                            ))
+                        except Exception:
+                            pass
                     el = Waypoint(
                         translation_target=TranslationTarget(
                             x_meters=float(tt.get("x_meters", 0.0)),
                             y_meters=float(tt.get("y_meters", 0.0)),
                             intermediate_handoff_radius_meters=self._opt_float(tt.get("intermediate_handoff_radius_meters")),
                         ),
-                        rotation_target=RotationTarget(
-                            rotation_radians=float(rt.get("rotation_radians", 0.0)),
-                            x_meters=float(rt.get("x_meters", 0.0)),
-                            y_meters=float(rt.get("y_meters", 0.0)),
-                        ),
+                        rotation_target=rot,
                     )
                     path.path_elements.append(el)
                 else:
@@ -417,6 +447,67 @@ class ProjectManager:
             except Exception:
                 # Skip malformed entries
                 continue
+        # Second pass: convert any legacy rotation x/y to t_ratio using neighbors
+        try:
+            for idx, element in enumerate(path.path_elements):
+                target = None
+                if isinstance(element, RotationTarget):
+                    target = element
+                elif isinstance(element, Waypoint):
+                    target = element.rotation_target
+                if target is None:
+                    continue
+                if hasattr(target, "_legacy_pos") and not hasattr(target, "_legacy_converted"):
+                    legacy = getattr(target, "_legacy_pos", None)
+                    if legacy is None:
+                        continue
+                    rx, ry = legacy
+                    # find prev and next anchors (TranslationTarget or Waypoint)
+                    # prev
+                    prev_pos = None
+                    for i in range(idx - 1, -1, -1):
+                        e = path.path_elements[i]
+                        if isinstance(e, TranslationTarget):
+                            prev_pos = (float(e.x_meters), float(e.y_meters))
+                            break
+                        if isinstance(e, Waypoint):
+                            prev_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                            break
+                    # next
+                    next_pos = None
+                    for j in range(idx + 1, len(path.path_elements)):
+                        e = path.path_elements[j]
+                        if isinstance(e, TranslationTarget):
+                            next_pos = (float(e.x_meters), float(e.y_meters))
+                            break
+                        if isinstance(e, Waypoint):
+                            next_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+                            break
+                    if prev_pos is None or next_pos is None:
+                        setattr(target, "t_ratio", 0.0)
+                    else:
+                        ax, ay = prev_pos
+                        bx, by = next_pos
+                        dx = bx - ax
+                        dy = by - ay
+                        denom = dx * dx + dy * dy
+                        if denom <= 0.0:
+                            t = 0.0
+                        else:
+                            t = ((rx - ax) * dx + (ry - ay) * dy) / denom
+                            if t < 0.0:
+                                t = 0.0
+                            elif t > 1.0:
+                                t = 1.0
+                        setattr(target, "t_ratio", float(t))
+                    # mark converted
+                    try:
+                        delattr(target, "_legacy_pos")
+                    except Exception:
+                        pass
+                    setattr(target, "_legacy_converted", True)
+        except Exception:
+            pass
         return path
 
     @staticmethod
@@ -441,10 +532,10 @@ class ProjectManager:
             path1 = Path()
             path1.path_elements.extend([
                 TranslationTarget(x_meters=2.0, y_meters=2.0),
-                RotationTarget(rotation_radians=0.0, x_meters=4.0, y_meters=3.0),
+                RotationTarget(rotation_radians=0.0, t_ratio=0.5),
                 Waypoint(
                     translation_target=TranslationTarget(x_meters=6.0, y_meters=4.0),
-                    rotation_target=RotationTarget(rotation_radians=0.5, x_meters=6.0, y_meters=4.0),
+                    rotation_target=RotationTarget(rotation_radians=0.5, t_ratio=0.0),
                 ),
                 TranslationTarget(x_meters=10.0, y_meters=6.0),
             ])
@@ -457,7 +548,7 @@ class ProjectManager:
             path2.path_elements.extend([
                 TranslationTarget(x_meters=1.0, y_meters=7.5),
                 TranslationTarget(x_meters=5.0, y_meters=6.0),
-                RotationTarget(rotation_radians=1.2, x_meters=8.0, y_meters=4.0),
+                RotationTarget(rotation_radians=1.2, t_ratio=0.5),
                 TranslationTarget(x_meters=12.5, y_meters=3.0),
             ])
             with open(os.path.join(paths_dir, "example_b.json"), "w", encoding="utf-8") as f:

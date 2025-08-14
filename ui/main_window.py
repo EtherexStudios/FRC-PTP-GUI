@@ -711,14 +711,42 @@ class MainWindow(QMainWindow):
             elem.x_meters = x_m
             elem.y_meters = y_m
         elif isinstance(elem, RotationTarget):
-            # For rotation targets, keep them constrained on the segment between neighbors
-            proj = self._project_point_between_neighbors(index, x_m, y_m)
-            elem.x_meters, elem.y_meters = proj
+            # Compute t_ratio from drag position and neighbor anchors
+            prev_pos = None
+            for i in range(index - 1, -1, -1):
+                e = self.path.path_elements[i]
+                if isinstance(e, TranslationTarget):
+                    prev_pos = (e.x_meters, e.y_meters)
+                    break
+                if isinstance(e, Waypoint):
+                    prev_pos = (e.translation_target.x_meters, e.translation_target.y_meters)
+                    break
+            next_pos = None
+            for i in range(index + 1, len(self.path.path_elements)):
+                e = self.path.path_elements[i]
+                if isinstance(e, TranslationTarget):
+                    next_pos = (e.x_meters, e.y_meters)
+                    break
+                if isinstance(e, Waypoint):
+                    next_pos = (e.translation_target.x_meters, e.translation_target.y_meters)
+                    break
+            if prev_pos is not None and next_pos is not None:
+                ax, ay = prev_pos
+                bx, by = next_pos
+                dx = bx - ax
+                dy = by - ay
+                denom = dx * dx + dy * dy
+                if denom > 0.0:
+                    t = ((x_m - ax) * dx + (y_m - ay) * dy) / denom
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                    elem.t_ratio = float(t)
         elif isinstance(elem, Waypoint):
             elem.translation_target.x_meters = x_m
             elem.translation_target.y_meters = y_m
-            elem.rotation_target.x_meters = x_m
-            elem.rotation_target.y_meters = y_m
+            # Waypoint rotation position is ratio-based; do not force x/y here
 
         self.sidebar.update_current_values_only()
         # defer autosave until drag finished; handled by elementDragFinished
@@ -744,13 +772,8 @@ class MainWindow(QMainWindow):
         self._schedule_autosave()
 
     def _reproject_all_rotation_positions(self):
-        if self.path is None:
-            return
-        for idx, e in enumerate(self.path.path_elements):
-            if isinstance(e, RotationTarget):
-                # Project using current model state
-                x_m, y_m = self._project_point_between_neighbors(idx, e.x_meters, e.y_meters)
-                e.x_meters, e.y_meters = x_m, y_m
+        # No-op under ratio-based rotation positioning. Canvas derives positions from t_ratio.
+        return
 
     def _project_point_between_neighbors(self, index: int, x_m: float, y_m: float) -> Tuple[float, float]:
         # Find previous and next translation/waypoint elements

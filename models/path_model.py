@@ -23,9 +23,11 @@ class TranslationTarget(PathElement):
 
 @dataclass
 class RotationTarget(PathElement):
-    rotation_radians : float = 0
-    x_meters : float = 0
-    y_meters : float = 0
+    rotation_radians: float = 0.0
+    # Position of the rotation target along the segment between the
+    # previous and next anchor elements (TranslationTarget or Waypoint).
+    # 0.0 corresponds to the previous anchor, 1.0 to the next anchor.
+    t_ratio: float = 0.0
 
 @dataclass
 class Waypoint(PathElement):
