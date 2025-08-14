@@ -188,16 +188,54 @@ class Sidebar(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(20)
         
-        label = QLabel("Path Elements")
-        top_layout.addWidget(label)
+        # label = QLabel("Path Elements")
+        # top_layout.addWidget(label)
+
+        # Refactored Path Elements label to match constraints title bar style
+        self.path_elements_bar = QWidget()
+        self.path_elements_bar.setObjectName("pathElementsBar")
+        self.path_elements_bar.setStyleSheet("""
+            QWidget#pathElementsBar {
+                background-color: #2f2f2f;
+                border: 1px solid #4a4a4a;
+                border-radius: 6px;
+            }
+        """)
+        path_elements_bar_layout = QHBoxLayout(self.path_elements_bar)
+        # Match constraints title bar margins/spacing precisely
+        path_elements_bar_layout.setContentsMargins(8, 0, 8, 0)
+        path_elements_bar_layout.setSpacing(8)
+
+        path_elements_label = QLabel("Path Elements")
+        path_elements_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            color: #eeeeee;
+            background: transparent;
+            border: none;
+            padding: 6px 0;
+        """)
+        path_elements_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        path_elements_bar_layout.addWidget(path_elements_label)
+        # Push label to the left and keep the add button at the right inside the bar
+        path_elements_bar_layout.addStretch()
         
-        top_layout.addStretch()  # Add stretch to push button to the right
+        # Removed stretch here to avoid pushing the path elements bar to the right
         
         self.add_element_pop = PopupCombobox()
         self.add_element_pop.setText("Add element")
         self.add_element_pop.setToolTip("Add a path element at the current selection")
-        top_layout.addWidget(self.add_element_pop)
-        
+        self.add_element_pop.button.setIconSize(QSize(16, 16))
+        self.add_element_pop.button.setMinimumHeight(22)
+        self.add_element_pop.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # prevent the button text from clipping within the bar
+        self.add_element_pop.setText("Add element")
+
+        path_elements_bar_layout.addWidget(self.add_element_pop)
+
+        # Make the bar expand to full width of the top section
+        top_layout.addWidget(self.path_elements_bar, 1)
+
         main_layout.addWidget(top_section)
 
         self.path = path
