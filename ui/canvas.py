@@ -8,9 +8,10 @@ from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLine
 
 from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
 from models.simulation import simulate_path, SimResult
-from PySide6.QtWidgets import QPushButton, QSlider, QLabel, QWidget, QHBoxLayout, QStyle
+from PySide6.QtWidgets import QPushButton, QSlider, QLabel, QWidget, QHBoxLayout, QStyle, QToolButton
 from PySide6.QtWidgets import QGraphicsProxyWidget
 from PySide6.QtCore import QRect, QSize
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QPolygon
 
 
 FIELD_LENGTH_METERS = 16.54
@@ -275,6 +276,80 @@ class RectElementItem(QGraphicsRectItem):
         super().mouseReleaseEvent(event)
 
 
+class RobotSimItem(QGraphicsRectItem):
+    """Graphics item that represents the robot during simulation playback."""
+    
+    def __init__(self, canvas_view: 'CanvasView'):
+        super().__init__()
+        self.canvas_view = canvas_view
+        
+        # Get robot dimensions from project config
+        robot_width_m = 0.5
+        robot_length_m = 0.5
+        try:
+            if hasattr(canvas_view, '_project_manager') and canvas_view._project_manager is not None:
+                config = canvas_view._project_manager.config or {}
+                robot_width_m = float(config.get('robot_width_meters', 0.5))
+                robot_length_m = float(config.get('robot_length_meters', 0.5))
+        except Exception:
+            pass
+        
+        # Set up rectangle centered at origin
+        self.setRect(QRectF(-robot_length_m/2, -robot_width_m/2, robot_length_m, robot_width_m))
+        
+        # Visual styling - semi-transparent orange with black outline
+        self.setBrush(QBrush(QColor(255, 165, 0, 120)))  # Orange with transparency
+        self.setPen(QPen(QColor("#000000"), 0.03))  # Black outline
+        
+        # Set z-value to appear above field but below UI elements
+        self.setZValue(15)
+        
+        # Not interactive
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        
+        # Add directional indicator (triangle pointing forward)
+        self.triangle_item = QGraphicsPolygonItem(self)
+        self._build_direction_triangle(robot_length_m, robot_width_m)
+        
+        # Current rotation in model radians (y-up)
+        self._angle_radians: float = 0.0
+    
+    def _build_direction_triangle(self, robot_length_m: float, robot_width_m: float):
+        """Build a triangle to show robot's forward direction."""
+        if self.triangle_item is None:
+            return
+        
+        # Triangle pointing forward (+X direction in robot frame)
+        triangle_size = min(robot_length_m, robot_width_m) * 0.3
+        triangle_offset = robot_length_m * 0.3  # Position it forward on the robot
+        
+        # Define triangle vertices (pointing right/forward)
+        points = [
+            QPointF(triangle_offset + triangle_size, 0.0),  # tip
+            QPointF(triangle_offset - triangle_size/2, triangle_size/2),  # bottom left
+            QPointF(triangle_offset - triangle_size/2, -triangle_size/2),  # top left
+        ]
+        
+        polygon = QPolygonF(points)
+        self.triangle_item.setPolygon(polygon)
+        self.triangle_item.setBrush(QBrush(QColor("#FFFFFF")))  # White triangle
+        self.triangle_item.setPen(QPen(QColor("#000000"), 0.02))  # Black outline
+        self.triangle_item.setZValue(self.zValue() + 1)
+    
+    def set_center(self, center_m: QPointF):
+        """Set the robot's center position in model coordinates."""
+        scene_pos = self.canvas_view._scene_from_model(center_m.x(), center_m.y())
+        self.setPos(scene_pos)
+    
+    def set_angle_radians(self, radians: float):
+        """Set the robot's rotation angle in model coordinates (y-up)."""
+        self._angle_radians = radians
+        # Convert model (y-up) to scene (y-down) and set degrees
+        angle_scene = -radians
+        self.setRotation(math.degrees(angle_scene))
+
+
 class RotationHandle(QGraphicsEllipseItem):
     def __init__(self, canvas_view: 'CanvasView', parent_center_item: RectElementItem, handle_distance_m: float, handle_radius_m: float, color: QColor):
         super().__init__()
@@ -472,6 +547,10 @@ class CanvasView(QGraphicsView):
         # Sim robot graphics item
         self._sim_robot_item: Optional[RobotSimItem] = None
         self._ensure_sim_robot_item()
+        
+        # Trail graphics items
+        self._trail_lines: List[QGraphicsLineItem] = []
+        self._trail_points: List[Tuple[float, float]] = []
 
         # Transport controls overlay
         self._transport_proxy: Optional[QGraphicsProxyWidget] = None
@@ -480,6 +559,13 @@ class CanvasView(QGraphicsView):
         self._transport_slider: Optional[QSlider] = None
         self._transport_label: Optional[QLabel] = None
         self._build_transport_controls()
+        
+        # Undo/Redo moved to main toolbar
+        # self._undo_redo_proxy: Optional[QGraphicsProxyWidget] = None
+        # self._undo_redo_widget: Optional[QWidget] = None  
+        # self._undo_btn: Optional[QToolButton] = None
+        # self._redo_btn: Optional[QToolButton] = None
+        # self._build_undo_redo_toolbar()
 
     def _load_field_background(self, image_path: str):
         pixmap = QPixmap(image_path)
@@ -504,6 +590,60 @@ class CanvasView(QGraphicsView):
             self.graphics_scene.addItem(item)
             self._sim_robot_item = item
             item.setVisible(False)
+        except Exception:
+            pass
+
+    def _clear_trail(self):
+        """Clear all trail line items from the scene."""
+        try:
+            for line in self._trail_lines:
+                if line.scene() is not None:
+                    self.graphics_scene.removeItem(line)
+            self._trail_lines.clear()
+            self._trail_points.clear()
+        except Exception:
+            pass
+
+    def _setup_trail(self, trail_points: List[Tuple[float, float]]):
+        """Set up the trail with the given points."""
+        try:
+            self._clear_trail()
+            self._trail_points = trail_points.copy()
+            
+            # Create line items for each segment but don't show them yet
+            orange_pen = QPen(QColor(255, 165, 0), 0.05)  # Orange trail
+            orange_pen.setCapStyle(Qt.RoundCap)
+            
+            for i in range(len(self._trail_points) - 1):
+                line = QGraphicsLineItem()
+                line.setPen(orange_pen)
+                line.setZValue(14)  # Above field, below robot
+                line.setVisible(False)  # Start invisible
+                self.graphics_scene.addItem(line)
+                self._trail_lines.append(line)
+        except Exception:
+            pass
+
+    def _update_trail_visibility(self, current_index: int):
+        """Update which trail segments are visible up to current_index."""
+        try:
+            if not self._trail_points or not self._trail_lines:
+                return
+            
+            # Show trail segments up to current position
+            for i in range(len(self._trail_lines)):
+                line = self._trail_lines[i]
+                if i < current_index and i < len(self._trail_points) - 1:
+                    # Set line coordinates and make visible
+                    x1, y1 = self._trail_points[i]
+                    x2, y2 = self._trail_points[i + 1]
+                    scene_p1 = self._scene_from_model(x1, y1)
+                    scene_p2 = self._scene_from_model(x2, y2)
+                    line.setLine(scene_p1.x(), scene_p1.y(), scene_p2.x(), scene_p2.y())
+                    line.setVisible(True)
+                else:
+                    # Hide this segment
+                    line.setVisible(False)
         except Exception:
             pass
 
@@ -554,6 +694,116 @@ class CanvasView(QGraphicsView):
         except Exception:
             pass
 
+    def _create_arrow_icon(self, direction: str, size: int = 16) -> QIcon:
+        """Create an arrow icon for undo/redo buttons."""
+        try:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Set up pen and brush
+            pen = QPen(QColor("#333333"), 2)
+            brush = QBrush(QColor("#333333"))
+            painter.setPen(pen)
+            painter.setBrush(brush)
+            
+            # Create arrow shape based on direction
+            center_x, center_y = size // 2, size // 2
+            arrow_size = size // 3
+            
+            if direction == "undo":  # Left arrow (curved)
+                # Draw a simple left-pointing arrow
+                arrow = QPolygon([
+                    QPoint(center_x - arrow_size, center_y),
+                    QPoint(center_x + arrow_size//2, center_y - arrow_size),
+                    QPoint(center_x + arrow_size//2, center_y - arrow_size//2),
+                    QPoint(center_x, center_y),
+                    QPoint(center_x + arrow_size//2, center_y + arrow_size//2),
+                    QPoint(center_x + arrow_size//2, center_y + arrow_size)
+                ])
+            else:  # "redo" - Right arrow
+                arrow = QPolygon([
+                    QPoint(center_x + arrow_size, center_y),
+                    QPoint(center_x - arrow_size//2, center_y - arrow_size),
+                    QPoint(center_x - arrow_size//2, center_y - arrow_size//2),
+                    QPoint(center_x, center_y),
+                    QPoint(center_x - arrow_size//2, center_y + arrow_size//2),
+                    QPoint(center_x - arrow_size//2, center_y + arrow_size)
+                ])
+            
+            painter.drawPolygon(arrow)
+            painter.end()
+            
+            return QIcon(pixmap)
+        except Exception:
+            # Return empty icon on error
+            return QIcon()
+
+    def _build_undo_redo_toolbar(self):
+        """Build the undo/redo toolbar overlay."""
+        try:
+            if self._undo_redo_widget is not None:
+                return
+            
+            w = QWidget()
+            layout = QHBoxLayout(w)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(2)
+            
+            # Undo button
+            undo_btn = QToolButton()
+            undo_btn.setIcon(self._create_arrow_icon("undo", 20))
+            undo_btn.setToolTip("Undo")
+            undo_btn.setFixedSize(28, 28)
+            undo_btn.setStyleSheet("""
+                QToolButton {
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    background-color: #f8f9fa;
+                }
+                QToolButton:hover {
+                    background-color: #e9ecef;
+                    border-color: #adb5bd;
+                }
+                QToolButton:pressed {
+                    background-color: #dee2e6;
+                }
+                QToolButton:disabled {
+                    background-color: #f8f9fa;
+                    border-color: #dee2e6;
+                    color: #6c757d;
+                }
+            """)
+            
+            # Redo button  
+            redo_btn = QToolButton()
+            redo_btn.setIcon(self._create_arrow_icon("redo", 20))
+            redo_btn.setToolTip("Redo")
+            redo_btn.setFixedSize(28, 28)
+            redo_btn.setStyleSheet(undo_btn.styleSheet())  # Same style as undo
+            
+            layout.addWidget(undo_btn)
+            layout.addWidget(redo_btn)
+            
+            # Create proxy widget
+            proxy = QGraphicsProxyWidget()
+            proxy.setWidget(w)
+            proxy.setZValue(30)  # Same level as transport controls
+            # Keep fixed pixel size on screen
+            proxy.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            self.graphics_scene.addItem(proxy)
+            
+            self._undo_redo_proxy = proxy
+            self._undo_redo_widget = w
+            self._undo_btn = undo_btn
+            self._redo_btn = redo_btn
+            
+            # Initial placement - will be positioned after transport controls
+            QTimer.singleShot(0, self._position_undo_redo_toolbar)
+        except Exception:
+            pass
+
     def _position_transport_controls(self):
         try:
             if self._transport_proxy is None:
@@ -565,6 +815,58 @@ class CanvasView(QGraphicsView):
             # Map to scene
             scene_pos = self.mapToScene(QPoint(int(px), int(py)))
             self._transport_proxy.setPos(scene_pos)
+        except Exception:
+            pass
+
+    def set_undo_redo_manager(self, undo_manager):
+        """Connect the toolbar buttons to the undo/redo manager."""
+        self._undo_manager = undo_manager
+        
+        if self._undo_btn is not None and self._redo_btn is not None:
+            # Connect button signals
+            self._undo_btn.clicked.connect(undo_manager.undo)
+            self._redo_btn.clicked.connect(undo_manager.redo)
+            
+            # Connect to undo manager state changes to update button states
+            undo_manager.add_callback(self._update_undo_redo_buttons)
+            
+            # Initial state update
+            self._update_undo_redo_buttons()
+
+    def _update_undo_redo_buttons(self):
+        """Update the enabled state of undo/redo buttons."""
+        try:
+            if hasattr(self, '_undo_manager') and self._undo_manager is not None:
+                if self._undo_btn is not None:
+                    self._undo_btn.setEnabled(self._undo_manager.can_undo())
+                    if self._undo_manager.can_undo():
+                        desc = self._undo_manager.get_undo_description()
+                        self._undo_btn.setToolTip(f"Undo {desc}" if desc else "Undo")
+                    else:
+                        self._undo_btn.setToolTip("Undo")
+                
+                if self._redo_btn is not None:
+                    self._redo_btn.setEnabled(self._undo_manager.can_redo())
+                    if self._undo_manager.can_redo():
+                        desc = self._undo_manager.get_redo_description()
+                        self._redo_btn.setToolTip(f"Redo {desc}" if desc else "Redo")
+                    else:
+                        self._redo_btn.setToolTip("Redo")
+        except Exception:
+            pass
+
+    def _position_undo_redo_toolbar(self):
+        """Position the undo/redo toolbar overlay."""
+        try:
+            if self._undo_redo_proxy is None:
+                return
+            view_rect: QRect = self.viewport().rect()
+            # Place at top-left corner with some padding
+            px = view_rect.left() + 12
+            py = view_rect.top() + 12
+            # Map to scene
+            scene_pos = self.mapToScene(QPoint(int(px), int(py)))
+            self._undo_redo_proxy.setPos(scene_pos)
         except Exception:
             pass
 
@@ -647,6 +949,9 @@ class CanvasView(QGraphicsView):
             elif radius is not None and radius > 0 and current_visualizer is not None:
                 current_visualizer.set_center(QPointF(pos[0], pos[1]))
                 current_visualizer.set_radius(radius)
+        
+        # Request simulation rebuild since handoff radius affects simulation behavior
+        self.request_simulation_rebuild()
 
     def refresh_from_model(self):
         # Update item positions and angles from model without rebuilding structure
@@ -801,12 +1106,15 @@ class CanvasView(QGraphicsView):
         QTimer.singleShot(0, self._fit_to_scene)
         # Reposition transport controls after resize
         QTimer.singleShot(0, self._position_transport_controls)
+        # Undo/redo toolbar moved to main window
+        # QTimer.singleShot(0, self._position_undo_redo_toolbar)
 
     def showEvent(self, event):
         super().showEvent(event)
         # Defer initial fit until after show completes
         QTimer.singleShot(0, self._fit_to_scene)
         QTimer.singleShot(0, self._position_transport_controls)
+        # QTimer.singleShot(0, self._position_undo_redo_toolbar)
 
     def _fit_to_scene(self):
         if self._is_fitting:
@@ -1311,6 +1619,7 @@ class CanvasView(QGraphicsView):
                 self._sim_current_time_s = 0.0
                 if self._sim_robot_item is not None:
                     self._sim_robot_item.setVisible(False)
+                self._clear_trail()
                 if self._transport_slider is not None:
                     self._transport_slider.setRange(0, 0)
                 if self._transport_label is not None:
@@ -1341,7 +1650,7 @@ class CanvasView(QGraphicsView):
             if self._transport_label is not None:
                 self._transport_label.setText(f"0.00 / {self._sim_total_time_s:.2f} s")
 
-            # Place robot at start if available
+            # Place robot at start and set up trail if available
             if self._sim_robot_item is not None:
                 if self._sim_times_sorted:
                     t0 = self._sim_times_sorted[0]
@@ -1350,6 +1659,12 @@ class CanvasView(QGraphicsView):
                     self._sim_robot_item.setVisible(True)
                 else:
                     self._sim_robot_item.setVisible(False)
+            
+            # Set up trail from simulation result
+            if hasattr(result, 'trail_points') and result.trail_points:
+                self._setup_trail(result.trail_points)
+            else:
+                self._clear_trail()
         except Exception:
             pass
 
@@ -1372,6 +1687,19 @@ class CanvasView(QGraphicsView):
                 # Do not start if no sim data
                 if not self._sim_times_sorted:
                     return
+                
+                # If we're at or near the end of the simulation, restart from the beginning
+                if self._sim_current_time_s >= self._sim_total_time_s:
+                    self._sim_current_time_s = 0.0
+                    self._seek_to_time(0.0)
+                    # Update slider position
+                    if self._transport_slider is not None:
+                        self._transport_slider.blockSignals(True)
+                        self._transport_slider.setValue(0)
+                        self._transport_slider.blockSignals(False)
+                    # Reset trail to beginning
+                    self._update_trail_visibility(0)
+                
                 self._sim_timer.start()
                 if self._transport_btn is not None:
                     self._transport_btn.setText("⏸")
@@ -1404,14 +1732,20 @@ class CanvasView(QGraphicsView):
             if not self._sim_times_sorted or not self._sim_poses_by_time:
                 return
             # Find nearest key at or before t_s; linear scan is fine for now; could use bisect
+            key_index = 0
             key = 0.0
-            for tk in self._sim_times_sorted:
+            for i, tk in enumerate(self._sim_times_sorted):
                 if tk <= t_s:
                     key = tk
+                    key_index = i
                 else:
                     break
             x, y, th = self._sim_poses_by_time.get(key, self._sim_poses_by_time[self._sim_times_sorted[0]])
             self._set_sim_robot_pose(x, y, th)
+            
+            # Update trail to show path up to current time
+            self._update_trail_visibility(key_index)
+            
             if self._transport_label is not None:
                 self._transport_label.setText(f"{t_s:.2f} / {self._sim_total_time_s:.2f} s")
         except Exception:

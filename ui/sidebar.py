@@ -1405,9 +1405,11 @@ class Sidebar(QWidget):
             else:
                 # Convert start to TranslationTarget
                 old = elems[0]
+                # RotationTarget doesn't have position, so find a nearby position or use default
+                x_pos, y_pos = self._get_safe_position_for_rotation(old, elems, 0)
                 elems[0] = TranslationTarget(
-                    x_meters=old.x_meters,
-                    y_meters=old.y_meters
+                    x_meters=x_pos,
+                    y_meters=y_pos
                 )
         # Repair end
         if elems and isinstance(elems[-1], RotationTarget):
@@ -1420,10 +1422,39 @@ class Sidebar(QWidget):
             else:
                 # Convert end to TranslationTarget
                 old = elems[-1]
+                # RotationTarget doesn't have position, so find a nearby position or use default
+                x_pos, y_pos = self._get_safe_position_for_rotation(old, elems, len(elems) - 1)
                 elems[-1] = TranslationTarget(
-                    x_meters=old.x_meters,
-                    y_meters=old.y_meters
+                    x_meters=x_pos,
+                    y_meters=y_pos
                 )
+
+    def _get_safe_position_for_rotation(self, rotation_target, elems, index):
+        """Get a safe position for converting a RotationTarget to TranslationTarget.
+        
+        Args:
+            rotation_target: The RotationTarget being converted
+            elems: List of all path elements
+            index: Index of the rotation_target in elems
+            
+        Returns:
+            Tuple[float, float]: (x_meters, y_meters) position
+        """
+        # Try to find a nearby anchor element with position
+        for offset in [1, -1, 2, -2]:
+            nearby_idx = index + offset
+            if 0 <= nearby_idx < len(elems):
+                elem = elems[nearby_idx]
+                if isinstance(elem, TranslationTarget):
+                    return elem.x_meters, elem.y_meters
+                elif isinstance(elem, Waypoint):
+                    return elem.translation_target.x_meters, elem.translation_target.y_meters
+        
+        # If no nearby position found, use a reasonable default
+        # Try to get field center or a reasonable starting position
+        field_center_x = 8.0  # Rough center of FRC field
+        field_center_y = 4.0
+        return field_center_x, field_center_y
 
     def _check_and_swap_rotation_targets(self):
         """Ensure rotation targets between two anchor elements (translation/waypoint) are ordered

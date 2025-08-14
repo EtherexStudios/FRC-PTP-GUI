@@ -11,26 +11,25 @@ from models.path_model import Path, PathElement, RotationTarget, TranslationTarg
 
 
 DEFAULT_CONFIG: Dict[str, float] = {
-    "robot_length_meters": 0.60,
-    "robot_width_meters": 0.60,
-    # Optional property defaults (degrees where applicable)
+    "robot_length_meters": 0.5,
+    "robot_width_meters": 0.5,
     "final_velocity_meters_per_sec": 0.0,
-    "max_velocity_meters_per_sec": 0.0,
-    "max_acceleration_meters_per_sec2": 0.0,
-    "intermediate_handoff_radius_meters": 0.0,
-    "max_velocity_deg_per_sec": 0.0,
-    "max_acceleration_deg_per_sec2": 0.0,
+    "max_velocity_meters_per_sec": 4.5,
+    "max_acceleration_meters_per_sec2": 7.0,
+    "intermediate_handoff_radius_meters": 0.2,
+    "max_velocity_deg_per_sec": 720.0,
+    "max_acceleration_deg_per_sec2": 360.0
 }
 
 EXAMPLE_CONFIG: Dict[str, float] = {
-    "robot_length_meters": 0.70,
-    "robot_width_meters": 0.62,
-    "final_velocity_meters_per_sec": 1.0,
-    "max_velocity_meters_per_sec": 3.0,
-    "max_acceleration_meters_per_sec2": 2.5,
-    "intermediate_handoff_radius_meters": 0.4,
-    "max_velocity_deg_per_sec": 180.0,
-    "max_acceleration_deg_per_sec2": 360.0,
+    "robot_length_meters": 0.5,
+    "robot_width_meters": 0.5,
+    "final_velocity_meters_per_sec": 0.0,
+    "max_velocity_meters_per_sec": 4.5,
+    "max_acceleration_meters_per_sec2": 7.0,
+    "intermediate_handoff_radius_meters": 0.2,
+    "max_velocity_deg_per_sec": 720.0,
+    "max_acceleration_deg_per_sec2": 360.0
 }
 
 

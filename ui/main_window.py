@@ -1,13 +1,17 @@
-from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog
-from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog, QToolBar, QToolButton
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QPainter, QPolygon, QPen, QBrush, QColor
+from PySide6.QtCore import QPoint, QSize
 import math
 import os
+import copy
+import platform
 from .sidebar import Sidebar
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
 from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from typing import Tuple
 from PySide6.QtCore import Qt, QTimer, QEvent
 from utils.project_manager import ProjectManager
+from utils.undo_system import UndoRedoManager, PathCommand, ConfigCommand
 from .config_dialog import ConfigDialog
 
 class MainWindow(QMainWindow):
@@ -17,6 +21,13 @@ class MainWindow(QMainWindow):
         self.resize(1000, 600)
         self.project_manager = ProjectManager()
         self.path = Path()  # start empty; will be replaced on project load
+        
+        # Initialize undo/redo system
+        self.undo_manager = UndoRedoManager()
+        self.undo_manager.add_callback(self._update_undo_redo_actions)
+
+        # Build menubar FIRST before setting up the layout
+        self._build_menu_bar()
 
         central = QWidget()  # Blank container for content
         self.setCentralWidget(central)
@@ -33,6 +44,8 @@ class MainWindow(QMainWindow):
         self.sidebar.project_manager = self.project_manager
         # Provide project manager to canvas for config defaults
         self.canvas.set_project_manager(self.project_manager)
+        # Connect canvas to undo manager (no longer needed for toolbar, but keep for other features)
+        # self.canvas.set_undo_redo_manager(self.undo_manager)
         self.sidebar.set_path(self.path)
         layout.addWidget(self.sidebar, stretch=1)  # Narrower
 
@@ -55,7 +68,8 @@ class MainWindow(QMainWindow):
         # Canvas interactions -> update model and sidebar
         self.canvas.elementMoved.connect(self._on_canvas_element_moved, Qt.QueuedConnection)
         self.canvas.elementRotated.connect(self._on_canvas_element_rotated, Qt.QueuedConnection)
-        # Handle end-of-drag to fix rotation ordering once user releases
+        # Handle start and end of drags for undo/redo
+        self.canvas.elementSelected.connect(self._on_canvas_element_pressed, Qt.QueuedConnection)
         self.canvas.elementDragFinished.connect(self._on_canvas_drag_finished, Qt.QueuedConnection)
 
         # Auto-save debounce timer
@@ -68,9 +82,11 @@ class MainWindow(QMainWindow):
         self.sidebar.modelChanged.connect(self._schedule_autosave)
         self.sidebar.modelStructureChanged.connect(self._schedule_autosave)
         self.canvas.elementDragFinished.connect(self._schedule_autosave)
+        
+        # Hook undo/redo for sidebar changes - simple approach to capture state before changes
+        self.sidebar.elementSelected.connect(self._on_element_selected_for_undo)
 
-        # Build menubar
-        self._build_menu_bar()
+        # Menu bar already built earlier
         
         # Create status bar for current path display
         self.statusBar = self.statusBar()
@@ -159,18 +175,93 @@ class MainWindow(QMainWindow):
         self.action_delete_path.triggered.connect(self._show_delete_path_dialog)
         path_menu.addAction(self.action_delete_path)
         
+        # Edit menu - for undo/redo (placed after Path, before Settings)
+        edit_menu: QMenu = bar.addMenu("Edit")
+        
+        # Create undo/redo actions with shortcuts and small icons
+        self.action_undo = QAction(self._create_arrow_icon("undo", 14), "Undo", self)
+        self.action_undo.setShortcut(QKeySequence.Undo)  # Use standard undo shortcut
+        self.action_undo.triggered.connect(self._action_undo)
+        self.action_undo.setEnabled(False)  # Will be enabled when undo is available
+        edit_menu.addAction(self.action_undo)
+        
+        self.action_redo = QAction(self._create_arrow_icon("redo", 14), "Redo", self)
+        self.action_redo.setShortcut(QKeySequence.Redo)  # Use standard redo shortcut
+        self.action_redo.triggered.connect(self._action_redo)
+        self.action_redo.setEnabled(False)  # Will be enabled when redo is available
+        edit_menu.addAction(self.action_redo)
+        
         # Settings menu - for configuration
         settings_menu: QMenu = bar.addMenu("Settings")
         self.action_edit_config = QAction("Edit Config…", self)
         self.action_edit_config.triggered.connect(self._action_edit_config)
         settings_menu.addAction(self.action_edit_config)
         
-        # Debug: print menu bar info
-        print(f"Menu bar created: {bar.isVisible()}, {bar.height()}, {bar.width()}")
-        print(f"Menu bar actions: {[action.text() for action in bar.actions()]}")
+        # Also add actions to main window to ensure shortcuts work
+        self.addAction(self.action_undo)
+        self.addAction(self.action_redo)
+        
         # Force menu bar to be visible and sized properly
-        self.menuBar().setVisible(True)
-        self.menuBar().setMinimumHeight(30)
+        menu_bar = self.menuBar()
+        menu_bar.setVisible(True)
+        menu_bar.show()
+        menu_bar.setMinimumHeight(30)
+        menu_bar.setMaximumHeight(40)
+        
+        # Try different approaches to force visibility
+        self.setMenuBar(menu_bar)  # Explicitly set the menu bar
+        menu_bar.raise_()  # Bring to front
+        
+        # Debug: Try to force a repaint
+        menu_bar.update()
+        self.update()
+
+    def _create_arrow_icon(self, direction: str, size: int = 16) -> QIcon:
+        """Create a small arrow icon for undo/redo buttons."""
+        try:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Set up pen and brush - smaller line width for delicate arrows
+            pen = QPen(QColor("#333333"), 1)
+            brush = QBrush(QColor("#333333"))
+            painter.setPen(pen)
+            painter.setBrush(brush)
+            
+            # Create simple arrow shape based on direction
+            center_x, center_y = size // 2, size // 2
+            arrow_size = size // 4  # Much smaller arrows
+            
+            if direction == "undo":  # Left arrow
+                arrow = QPolygon([
+                    QPoint(center_x - arrow_size, center_y),
+                    QPoint(center_x + arrow_size//2, center_y - arrow_size//2),
+                    QPoint(center_x + arrow_size//2, center_y - arrow_size//4),
+                    QPoint(center_x, center_y),
+                    QPoint(center_x + arrow_size//2, center_y + arrow_size//4),
+                    QPoint(center_x + arrow_size//2, center_y + arrow_size//2)
+                ])
+            else:  # "redo" - Right arrow
+                arrow = QPolygon([
+                    QPoint(center_x + arrow_size, center_y),
+                    QPoint(center_x - arrow_size//2, center_y - arrow_size//2),
+                    QPoint(center_x - arrow_size//2, center_y - arrow_size//4),
+                    QPoint(center_x, center_y),
+                    QPoint(center_x - arrow_size//2, center_y + arrow_size//4),
+                    QPoint(center_x - arrow_size//2, center_y + arrow_size//2)
+                ])
+            
+            painter.drawPolygon(arrow)
+            painter.end()
+            
+            return QIcon(pixmap)
+        except Exception:
+            # Return empty icon on error
+            return QIcon()
+
+
 
     def _populate_load_path_menu(self):
         self.menu_load_path.clear()
@@ -338,7 +429,100 @@ class MainWindow(QMainWindow):
         self._update_current_path_display()
         self.canvas.request_simulation_rebuild()
 
+    def _action_undo(self):
+        """Perform undo operation."""
+        command = self.undo_manager.undo()
+        if command:
+            # Refresh all UI components
+            self._refresh_after_undo_redo()
+    
+    def _action_redo(self):
+        """Perform redo operation."""
+        command = self.undo_manager.redo()
+        if command:
+            # Refresh all UI components
+            self._refresh_after_undo_redo()
+    
+    def _update_undo_redo_actions(self):
+        """Update the enabled state and text of undo/redo actions."""
+        # Update undo action
+        if self.undo_manager.can_undo():
+            desc = self.undo_manager.get_undo_description()
+            self.action_undo.setText(f"Undo {desc}" if desc else "Undo")
+            self.action_undo.setEnabled(True)
+        else:
+            self.action_undo.setText("Undo")
+            self.action_undo.setEnabled(False)
+        
+        # Update redo action
+        if self.undo_manager.can_redo():
+            desc = self.undo_manager.get_redo_description()
+            self.action_redo.setText(f"Redo {desc}" if desc else "Redo")
+            self.action_redo.setEnabled(True)
+        else:
+            self.action_redo.setText("Redo")
+            self.action_redo.setEnabled(False)
+    
+    def _refresh_after_undo_redo(self):
+        """Refresh all UI components after an undo/redo operation."""
+        # Refresh canvas from model
+        self.canvas.set_path(self.path)
+        self.canvas.refresh_from_model()
+        self.canvas.update_handoff_radius_visualizers()
+        self.canvas.request_simulation_rebuild()
+        
+        # Refresh sidebar
+        self.sidebar.set_path(self.path)
+        self.sidebar.refresh_current_selection()
+        
+        # Apply config changes to canvas
+        self._apply_robot_dims_from_config(self.project_manager.config)
+        
+        # Update path display
+        self._update_current_path_display()
+    
+    def _record_path_change(self, description: str, old_path: Path = None):
+        """Record a path change in the undo system."""
+        if old_path is None:
+            # Create a snapshot of the current path before change
+            old_path = copy.deepcopy(self.path)
+        
+        # The new path state will be captured after the change is made
+        def create_command():
+            new_path = copy.deepcopy(self.path)
+            command = PathCommand(
+                path_ref=self.path,
+                old_state=old_path,
+                new_state=new_path,
+                description=description,
+                on_change_callback=self._refresh_after_undo_redo
+            )
+            self.undo_manager.execute_command(command)
+        
+        # Defer command creation to next event loop iteration
+        # so the change is applied first
+        QTimer.singleShot(0, create_command)
+    
+    def _record_config_change(self, description: str, old_config: dict = None):
+        """Record a config change in the undo system."""
+        if old_config is None:
+            old_config = copy.deepcopy(self.project_manager.config)
+        
+        def create_command():
+            new_config = copy.deepcopy(self.project_manager.config)
+            command = ConfigCommand(
+                project_manager=self.project_manager,
+                old_config=old_config,
+                new_config=new_config,
+                description=description,
+                on_change_callback=self._refresh_after_undo_redo
+            )
+            self.undo_manager.execute_command(command)
+        
+        QTimer.singleShot(0, create_command)
+
     def _action_edit_config(self):
+        old_config = copy.deepcopy(self.project_manager.config)
         cfg = self.project_manager.load_config()
         dlg = ConfigDialog(self, cfg, on_change=self._on_config_live_change)
         if dlg.exec() == QDialog.Accepted:
@@ -352,12 +536,17 @@ class MainWindow(QMainWindow):
 
             # Refresh sidebar for current selection so defaults/UI reflect changes
             self.sidebar.refresh_current_selection()
+            
+            # Record the config change for undo/redo
+            self._record_config_change("Edit Config", old_config)
 
     def _on_config_live_change(self, key: str, value: float):
         # Persist to config immediately
         self.project_manager.save_config({key: value})
         if key in ("robot_length_meters", "robot_width_meters"):
             self._apply_robot_dims_from_config(self.project_manager.config)
+        # Config changes affect simulation constraints/gains; rebuild sim
+        self.canvas.request_simulation_rebuild()
         # For optional defaults, no immediate changes unless fields are being added later.
         # Still refresh visible sidebar to reflect any fields that might show defaults.
         self.sidebar.refresh_current_selection()
@@ -710,12 +899,23 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'statusBar'):
                     self.statusBar.showMessage("No path loaded")
 
+    def _on_canvas_element_pressed(self, index: int):
+        """Called when an element is first selected/pressed for potential dragging."""
+        # Capture the initial state before any drag operation
+        self._drag_start_state = copy.deepcopy(self.path)
+    
+    def _on_element_selected_for_undo(self, index: int):
+        """Called when an element is selected - capture state for potential edits."""
+        # Capture state when element is selected for potential editing
+        self._last_selected_state = copy.deepcopy(self.path)
+
     def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
         # Suppress during window state transitions to avoid re-entrant churn
         if getattr(self, '_layout_stabilizing', False):
             return
         if index < 0 or index >= len(self.path.path_elements):
             return
+        
         # Clamp via sidebar metadata to keep UI and model consistent
         x_m = Sidebar._clamp_from_metadata('x_meters', float(x_m))
         y_m = Sidebar._clamp_from_metadata('y_meters', float(y_m))
@@ -770,6 +970,7 @@ class MainWindow(QMainWindow):
             return
         if index < 0 or index >= len(self.path.path_elements):
             return
+        
         elem = self.path.path_elements[index]
         # Clamp using sidebar metadata (degrees domain), then convert back to radians
         degrees = math.degrees(radians)
@@ -831,6 +1032,13 @@ class MainWindow(QMainWindow):
             return
         if index < 0 or index >= len(self.path.path_elements):
             return
+        
+        # Record the drag operation for undo/redo
+        if hasattr(self, '_drag_start_state'):
+            element_type = type(self.path.path_elements[index]).__name__
+            self._record_path_change(f"Move {element_type}", self._drag_start_state)
+            delattr(self, '_drag_start_state')
+        
         # Remember which element was dragged so we can re-select it after any reordering
         dragged_elem = self.path.path_elements[index]
 
