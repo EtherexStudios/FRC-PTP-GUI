@@ -78,6 +78,12 @@ def limit_acceleration(
 
 
 @dataclass
+class _RotationKeyframe:
+    t_ratio: float
+    theta_target: float
+    profiled_rotation: bool = True
+
+@dataclass
 class _Segment:
     ax: float
     ay: float
@@ -86,7 +92,7 @@ class _Segment:
     length_m: float
     ux: float
     uy: float
-    keyframes: List[Tuple[float, float]]  # list of (t_ratio, theta_target)
+    keyframes: List[_RotationKeyframe]  # list of rotation keyframes
 
 
 def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float]], List[int]]:
@@ -142,7 +148,10 @@ def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float
             t_ratio = float(getattr(elem, "t_ratio", 0.0))
             t_ratio = 0.0 if t_ratio < 0.0 else 1.0 if t_ratio > 1.0 else t_ratio
             theta = float(elem.rotation_radians)
-            segments[prev_anchor_ord].keyframes.append((t_ratio, theta))
+            profiled = getattr(elem, "profiled_rotation", True)
+            # DEBUG: Print rotation target properties
+            print(f"DEBUG: RotationTarget at t_ratio={t_ratio:.2f}, theta={math.degrees(theta):.1f}°, profiled={profiled}")
+            segments[prev_anchor_ord].keyframes.append(_RotationKeyframe(t_ratio, theta, profiled))
         elif isinstance(elem, Waypoint):
             rt = elem.rotation_target
             this_anchor_ord = path_idx_to_anchor_ord.get(idx)
@@ -158,26 +167,32 @@ def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float
             # This ensures the robot has the correct heading when leaving the waypoint
             if this_anchor_ord < len(segments):
                 theta = float(rt.rotation_radians)
-                segments[this_anchor_ord].keyframes.append((0.0, theta))
+                profiled = getattr(rt, "profiled_rotation", True)
+                # DEBUG: Print waypoint rotation properties
+                print(f"DEBUG: Waypoint rotation at start: theta={math.degrees(theta):.1f}°, profiled={profiled}")
+                segments[this_anchor_ord].keyframes.append(_RotationKeyframe(0.0, theta, profiled))
             
             # Also add to the previous segment with t_ratio = 1.0 if it exists
             # This ensures the robot rotates to the correct heading when arriving at the waypoint
             if this_anchor_ord > 0:
                 theta = float(rt.rotation_radians)
-                segments[this_anchor_ord - 1].keyframes.append((1.0, theta))
+                profiled = getattr(rt, "profiled_rotation", True)
+                # DEBUG: Print waypoint rotation properties
+                print(f"DEBUG: Waypoint rotation at end: theta={math.degrees(theta):.1f}°, profiled={profiled}")
+                segments[this_anchor_ord - 1].keyframes.append(_RotationKeyframe(1.0, theta, profiled))
 
     for seg in segments:
         if not seg.keyframes:
             continue
-        seg.keyframes.sort(key=lambda kv: kv[0])
-        dedup: List[Tuple[float, float]] = []
+        seg.keyframes.sort(key=lambda kf: kf.t_ratio)
+        dedup: List[_RotationKeyframe] = []
         last_t: Optional[float] = None
-        for t, th in seg.keyframes:
-            if last_t is not None and abs(t - last_t) < 1e-9:
-                dedup[-1] = (t, th)
+        for kf in seg.keyframes:
+            if last_t is not None and abs(kf.t_ratio - last_t) < 1e-9:
+                dedup[-1] = kf  # Replace with latest
             else:
-                dedup.append((t, th))
-                last_t = t
+                dedup.append(kf)
+                last_t = kf.t_ratio
         seg.keyframes = dedup
 
     return segments, anchors, anchor_path_indices
@@ -191,33 +206,113 @@ def _desired_heading_for_progress(
     seg: _Segment,
     progress_t: float,
     start_heading: float,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, bool]:
     t = 0.0 if progress_t < 0.0 else 1.0 if progress_t > 1.0 else progress_t
 
     if not seg.keyframes:
-        return start_heading, 0.0
+        return start_heading, 0.0, True
 
-    frames: List[Tuple[float, float]] = []
-    if seg.keyframes[0][0] > 0.0 + 1e-9:
-        frames.append((0.0, start_heading))
-    frames.extend(seg.keyframes)
+    frames: List[Tuple[float, float, bool]] = []
+    if seg.keyframes[0].t_ratio > 0.0 + 1e-9:
+        frames.append((0.0, start_heading, True))
+    for kf in seg.keyframes:
+        frames.append((kf.t_ratio, kf.theta_target, kf.profiled_rotation))
 
     for i in range(len(frames) - 1):
-        t0, th0 = frames[i]
-        t1, th1 = frames[i + 1]
+        t0, th0, profiled0 = frames[i]
+        t1, th1, profiled1 = frames[i + 1]
         if t <= t0 + 1e-12:
+            # If the upcoming keyframe is non-profiled, snap target to that keyframe immediately
+            if not profiled1:
+                return th1, 0.0, profiled1
             delta = shortest_angular_distance(th1, th0)
             dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
-            return th0, dtheta_ds
+            return th0, dtheta_ds, profiled1  # Profiled: interpolate from th0
         if t0 < t <= t1 + 1e-12:
+            # If this segment of heading is non-profiled, target the end keyframe directly
+            if not profiled1:
+                return th1, 0.0, profiled1
             alpha = (t - t0) / max((t1 - t0), 1e-9)
             delta = shortest_angular_distance(th1, th0)
             desired_theta = wrap_angle_radians(th0 + delta * alpha)
             dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
-            return desired_theta, dtheta_ds
+            return desired_theta, dtheta_ds, profiled1  # Profiled: interpolate toward th1
 
-    t_last, th_last = frames[-1]
-    return th_last, 0.0
+    t_last, th_last, profiled_last = frames[-1]
+    # If the final keyframe is non-profiled, just hold that target
+    if not profiled_last:
+        return th_last, 0.0, profiled_last
+    return th_last, 0.0, profiled_last
+
+
+def _trapezoidal_rotation_profile(
+    current_theta: float,
+    target_theta: float,
+    current_omega: float,
+    max_omega: float,
+    max_alpha: float,
+    dt: float
+) -> float:
+    """
+    Implements a smooth trapezoidal motion profile for fast rotation.
+    Returns the desired angular velocity change for this timestep.
+    """
+    angular_error = shortest_angular_distance(target_theta, current_theta)
+    
+    # DEBUG: Print detailed trapezoidal profile state
+    if abs(angular_error) > math.radians(1.0):  # Only debug significant rotations
+        print(f"DEBUG: Trapezoidal profile - error={math.degrees(angular_error):.1f}°, "
+              f"current_omega={math.degrees(current_omega):.1f}°/s, "
+              f"max_omega={math.degrees(max_omega):.1f}°/s, "
+              f"max_alpha={math.degrees(max_alpha):.1f}°/s²")
+    
+    # If we're very close to the target, stop smoothly
+    if abs(angular_error) < math.radians(0.5):  # 0.5 degree tolerance
+        # Gradual stop rather than instant
+        return current_omega * 0.8
+    
+    # Calculate the distance needed to decelerate to zero from current velocity
+    decel_distance = abs(current_omega) * abs(current_omega) / (2.0 * max_alpha)
+    
+    # Direction of rotation
+    direction = math.copysign(1.0, angular_error)
+    
+    # DEBUG: Show decision logic
+    debug_msg = ""
+    
+    # Determine the target velocity for this phase
+    if abs(angular_error) > decel_distance + math.radians(5.0):
+        # Acceleration/constant velocity phase - target max velocity
+        target_omega = direction * max_omega
+        debug_msg = "accelerating to max velocity"
+    else:
+        # Deceleration phase - calculate appropriate target velocity
+        # Use a velocity that will allow us to stop at the target
+        remaining_distance = abs(angular_error)
+        # v² = 2*a*d, so v = sqrt(2*a*d)
+        target_speed = math.sqrt(2.0 * max_alpha * remaining_distance)
+        target_speed = min(target_speed, max_omega)  # Don't exceed max velocity
+        target_omega = direction * target_speed
+        debug_msg = f"decelerating, target_speed={math.degrees(target_speed):.1f}°/s"
+    
+    # Smoothly approach the target velocity using acceleration limiting
+    omega_error = target_omega - current_omega
+    max_omega_change = max_alpha * dt
+    
+    if abs(omega_error) <= max_omega_change:
+        # Can reach target velocity in this timestep
+        desired_omega = target_omega
+        debug_msg += " (reached target velocity)"
+    else:
+        # Gradually change towards target velocity
+        omega_change = math.copysign(max_omega_change, omega_error)
+        desired_omega = current_omega + omega_change
+        debug_msg += f" (changing by {math.degrees(omega_change):.1f}°/s)"
+    
+    if abs(angular_error) > math.radians(1.0):
+        print(f"DEBUG: {debug_msg} -> desired_omega={math.degrees(desired_omega):.1f}°/s")
+    
+    return desired_omega
 
 
 def _resolve_constraint(value: Optional[float], fallback: Optional[float], default: float) -> float:
@@ -288,6 +383,9 @@ def simulate_path(
 
     max_omega = math.radians(_resolve_constraint(getattr(c, "max_velocity_deg_per_sec", None), cfg.get("max_velocity_deg_per_sec"), 180.0))
     max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("max_acceleration_deg_per_sec2"), 360.0))
+    
+    # DEBUG: Print angular constraints
+    print(f"DEBUG: Angular constraints - max_omega={math.degrees(max_omega):.1f}°/s, max_alpha={math.degrees(max_alpha):.1f}°/s²")
 
     # Default handoff radius from config
     default_handoff_radius = _resolve_constraint(None, cfg.get("intermediate_handoff_radius_meters"), 0.05)
@@ -302,9 +400,9 @@ def simulate_path(
     first_seg = segments[0]
     initial_heading = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
     if first_seg.keyframes:
-        for t, th in sorted(first_seg.keyframes, key=lambda kv: kv[0]):
-            if t <= 1e-6:
-                initial_heading = th
+        for kf in sorted(first_seg.keyframes, key=lambda kf: kf.t_ratio):
+            if kf.t_ratio <= 1e-6:
+                initial_heading = kf.theta_target
                 break
 
     x = first_seg.ax
@@ -384,7 +482,7 @@ def simulate_path(
             prev_seg = segments[seg_idx - 1] if seg_idx > 0 else None
             if prev_seg is not None and prev_seg.keyframes:
                 # Use the last rotation target from the previous segment
-                segment_start_heading = prev_seg.keyframes[-1][1]
+                segment_start_heading = prev_seg.keyframes[-1].theta_target
             else:
                 # No previous rotation targets, maintain current heading
                 segment_start_heading = theta
@@ -396,7 +494,7 @@ def simulate_path(
                 # For subsequent segments, maintain current heading if no rotation targets
                 segment_start_heading = theta
 
-        desired_theta, dtheta_ds = _desired_heading_for_progress(seg, progress_t, segment_start_heading)
+        desired_theta, dtheta_ds, profiled_rotation = _desired_heading_for_progress(seg, progress_t, segment_start_heading)
 
         v_proj = dot(speeds.vx_mps, speeds.vy_mps, ux, uy)
         v_curr = max(v_proj, 0.0)
@@ -404,12 +502,18 @@ def simulate_path(
         remaining = remaining_distance_from(seg_idx, x, y, projected_s)
 
         abs_dtheta_ds = abs(dtheta_ds)
-        if abs_dtheta_ds > 1e-9:
-            max_v_dyn = max_omega / abs_dtheta_ds
-            max_a_dyn = max_alpha / abs_dtheta_ds
+        if profiled_rotation:
+            # Profiled: translation speed limited by heading change rate
+            if abs_dtheta_ds > 1e-9:
+                max_v_dyn = max_omega / abs_dtheta_ds
+                max_a_dyn = max_alpha / abs_dtheta_ds
+            else:
+                max_v_dyn = max_v + 100.0
+                max_a_dyn = max_a + 100.0
         else:
-            max_v_dyn = max_v + 100.0
-            max_a_dyn = max_a + 100.0
+            # Non-profiled rotation should not bottleneck translation speed
+            max_v_dyn = max_v
+            max_a_dyn = max_a
 
         max_a_mag = min(max_a, max_a_dyn)
 
@@ -424,25 +528,51 @@ def simulate_path(
         vx_des = v_des_scalar * ux
         vy_des = v_des_scalar * uy
 
-        # IMPROVED ROTATION CONTROL: Direct angular error calculation
-        angular_error = shortest_angular_distance(desired_theta, theta)
-        
-        # Calculate the required angular velocity to reach target in one timestep
-        required_omega = angular_error / dt_s
-        
-        # Limit to maximum angular velocity
-        if abs(required_omega) > max_omega:
-            omega_des = math.copysign(max_omega, required_omega)
+        # ROTATION CONTROL: Choose between profiled and trapezoidal motion
+        if profiled_rotation:
+            # PROFILED ROTATION: Direct angular error calculation for smooth motion
+            angular_error = shortest_angular_distance(desired_theta, theta)
+            
+            # Calculate the required angular velocity to reach target in one timestep
+            required_omega = angular_error / dt_s
+            
+            # Limit to maximum angular velocity
+            if abs(required_omega) > max_omega:
+                omega_des = math.copysign(max_omega, required_omega)
+            else:
+                omega_des = required_omega
+                
+            # Apply normal acceleration limiting for profiled rotation
+            limited = limit_acceleration(
+                desired=ChassisSpeeds(vx_des, vy_des, omega_des),
+                last=speeds,
+                dt=dt_s,
+                max_trans_accel_mps2=max_a,
+                max_angular_accel_radps2=max_alpha,
+            )
         else:
-            omega_des = required_omega
-
-        limited = limit_acceleration(
-            desired=ChassisSpeeds(vx_des, vy_des, omega_des),
-            last=speeds,
-            dt=dt_s,
-            max_trans_accel_mps2=max_a,
-            max_angular_accel_radps2=max_alpha,
-        )
+            # NON-PROFILED ROTATION: Use trapezoidal motion profile for fast rotation
+            # DEBUG: Print when using non-profiled rotation
+            if t_s == 0.0:  # Only print once at start to avoid spam
+                print(f"DEBUG: Using NON-PROFILED rotation for target {math.degrees(desired_theta):.1f}°")
+            omega_des = _trapezoidal_rotation_profile(
+                current_theta=theta,
+                target_theta=desired_theta,
+                current_omega=speeds.omega_radps,
+                max_omega=max_omega,
+                max_alpha=max_alpha,
+                dt=dt_s
+            )
+            
+            # For non-profiled rotation, use normal acceleration limiting
+            # The trapezoidal profile now handles smooth acceleration internally
+            limited = limit_acceleration(
+                desired=ChassisSpeeds(vx_des, vy_des, omega_des),
+                last=speeds,
+                dt=dt_s,
+                max_trans_accel_mps2=max_a,
+                max_angular_accel_radps2=max_alpha,  # Use normal angular acceleration limits
+            )
 
         v_mag = hypot2(limited.vx_mps, limited.vy_mps)
         if v_mag > max_v > 0.0:

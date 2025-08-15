@@ -6,5 +6,5 @@
   "max_acceleration_meters_per_sec2": 7.0,
   "intermediate_handoff_radius_meters": 0.1,
   "max_velocity_deg_per_sec": 720.0,
-  "max_acceleration_deg_per_sec2": 1200.0
+  "max_acceleration_deg_per_sec2": 3000.0
 }
