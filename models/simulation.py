@@ -217,7 +217,7 @@ def _desired_heading_for_progress(
             return desired_theta, dtheta_ds
 
     t_last, th_last = frames[-1]
-    return t_last, 0.0
+    return th_last, 0.0
 
 
 def _resolve_constraint(value: Optional[float], fallback: Optional[float], default: float) -> float:
@@ -300,16 +300,16 @@ def simulate_path(
         cumulative_lengths.append(total_path_len)
 
     first_seg = segments[0]
-    start_heading = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
+    initial_heading = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
     if first_seg.keyframes:
         for t, th in sorted(first_seg.keyframes, key=lambda kv: kv[0]):
             if t <= 1e-6:
-                start_heading = th
+                initial_heading = th
                 break
 
     x = first_seg.ax
     y = first_seg.ay
-    theta = start_heading
+    theta = initial_heading
 
     dx = first_seg.bx - x
     dy = first_seg.by - y
@@ -378,14 +378,25 @@ def simulate_path(
 
         progress_t = projected_s / seg.length_m if seg.length_m > 1e-9 else 0.0
 
+        # Determine the start heading for this segment
         if projected_s <= 1e-9 and t_s > 0.0:
+            # At the beginning of a new segment
             prev_seg = segments[seg_idx - 1] if seg_idx > 0 else None
             if prev_seg is not None and prev_seg.keyframes:
-                start_heading = prev_seg.keyframes[-1][1]
+                # Use the last rotation target from the previous segment
+                segment_start_heading = prev_seg.keyframes[-1][1]
             else:
-                start_heading = theta
+                # No previous rotation targets, maintain current heading
+                segment_start_heading = theta
+        else:
+            # Continuing within the same segment or at the very start
+            if seg_idx == 0:
+                segment_start_heading = initial_heading
+            else:
+                # For subsequent segments, maintain current heading if no rotation targets
+                segment_start_heading = theta
 
-        desired_theta, dtheta_ds = _desired_heading_for_progress(seg, progress_t, start_heading)
+        desired_theta, dtheta_ds = _desired_heading_for_progress(seg, progress_t, segment_start_heading)
 
         v_proj = dot(speeds.vx_mps, speeds.vy_mps, ux, uy)
         v_curr = max(v_proj, 0.0)
