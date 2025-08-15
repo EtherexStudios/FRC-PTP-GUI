@@ -71,6 +71,10 @@ class MainWindow(QMainWindow):
         # Handle start and end of drags for undo/redo
         self.canvas.elementSelected.connect(self._on_canvas_element_pressed, Qt.QueuedConnection)
         self.canvas.elementDragFinished.connect(self._on_canvas_drag_finished, Qt.QueuedConnection)
+        # Canvas delete key -> sidebar delete current element
+        self.canvas.deleteSelectedRequested.connect(self._delete_selected_element)
+        # Sidebar delete key -> same handler
+        self.sidebar.deleteSelectedRequested.connect(self._delete_selected_element)
 
         # Auto-save debounce timer
         self._autosave_timer = QTimer(self)
@@ -102,6 +106,15 @@ class MainWindow(QMainWindow):
         self._config_edit_old_config: dict | None = None
         # Mark sidebar ready after initial layout
         QTimer.singleShot(0, self.sidebar.mark_ready)
+
+    def _delete_selected_element(self):
+        idx = self.sidebar.get_selected_index()
+        if idx is None:
+            return
+        # Record undo snapshot before deletion
+        old_state = copy.deepcopy(self.path)
+        self.sidebar._on_remove_element(idx)
+        self._record_path_change("Delete element", old_state)
 
     def changeEvent(self, event):
         # Detect window state changes (e.g., entering/exiting fullscreen) and
@@ -562,6 +575,13 @@ class MainWindow(QMainWindow):
         # For optional defaults, no immediate changes unless fields are being added later.
         # Still refresh visible sidebar to reflect any fields that might show defaults.
         self.sidebar.refresh_current_selection()
+        # If the config dialog is open, keep its spinners in sync with potential external config changes
+        try:
+            active = self.activeWindow()
+            if isinstance(active, ConfigDialog):
+                active.sync_from_config(self.project_manager.config)
+        except Exception:
+            pass
 
     def _load_path_file(self, filename: str):
         p = self.project_manager.load_path(filename)

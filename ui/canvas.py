@@ -314,6 +314,16 @@ class RobotSimItem(QGraphicsRectItem):
         
         # Current rotation in model radians (y-up)
         self._angle_radians: float = 0.0
+
+    def set_dimensions(self, length_m: float, width_m: float):
+        """Update the robot visualization dimensions (meters)."""
+        try:
+            # Update rectangle geometry
+            self.setRect(QRectF(-length_m/2.0, -width_m/2.0, length_m, width_m))
+            # Rebuild direction indicator to match new size
+            self._build_direction_triangle(length_m, width_m)
+        except Exception:
+            pass
     
     def _build_direction_triangle(self, robot_length_m: float, robot_width_m: float):
         """Build a triangle to show robot's forward direction."""
@@ -498,6 +508,8 @@ class CanvasView(QGraphicsView):
     elementRotated = Signal(int, float)  # index, radians
     # Emitted once when the user releases the mouse after dragging an item
     elementDragFinished = Signal(int)  # index
+    # Emitted when user presses Delete/Backspace to delete current selection
+    deleteSelectedRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -506,6 +518,8 @@ class CanvasView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+        # Ensure the view can receive keyboard focus for shortcuts
+        self.setFocusPolicy(Qt.StrongFocus)
         self._is_fitting = False
         # Guard to avoid emitting elementMoved while performing programmatic updates
         self._suppress_live_events: bool = False
@@ -559,13 +573,6 @@ class CanvasView(QGraphicsView):
         self._transport_slider: Optional[QSlider] = None
         self._transport_label: Optional[QLabel] = None
         self._build_transport_controls()
-        
-        # Undo/Redo moved to main toolbar
-        # self._undo_redo_proxy: Optional[QGraphicsProxyWidget] = None
-        # self._undo_redo_widget: Optional[QWidget] = None  
-        # self._undo_btn: Optional[QToolButton] = None
-        # self._redo_btn: Optional[QToolButton] = None
-        # self._build_undo_redo_toolbar()
 
     def _load_field_background(self, image_path: str):
         pixmap = QPixmap(image_path)
@@ -590,6 +597,11 @@ class CanvasView(QGraphicsView):
             self.graphics_scene.addItem(item)
             self._sim_robot_item = item
             item.setVisible(False)
+            # Ensure initial size matches current canvas robot dimensions
+            try:
+                item.set_dimensions(self.robot_length_m, self.robot_width_m)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -890,6 +902,13 @@ class CanvasView(QGraphicsView):
         if self._path is not None:
             self._reproject_rotation_items_in_scene()
         # Sim robot uses same size; nothing else needed
+        # Also resize the simulation robot visualization
+        try:
+            self._ensure_sim_robot_item()
+            if self._sim_robot_item is not None:
+                self._sim_robot_item.set_dimensions(self.robot_length_m, self.robot_width_m)
+        except Exception:
+            pass
 
     def set_project_manager(self, project_manager):
         """Set the project manager reference to access default config values"""
@@ -1774,3 +1793,14 @@ class CanvasView(QGraphicsView):
             pass
 
 
+
+    def keyPressEvent(self, event):
+        """Handle Delete/Backspace to request deletion of the current element selection."""
+        try:
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                self.deleteSelectedRequested.emit()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().keyPressEvent(event)

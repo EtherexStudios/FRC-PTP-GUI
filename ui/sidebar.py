@@ -17,6 +17,7 @@ class ElementType(Enum):
 
 class CustomList(QListWidget):  # Changed to QListWidget    
     reordered = Signal()  # Move Signal definition here (class-level)
+    deleteRequested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -31,6 +32,16 @@ class CustomList(QListWidget):  # Changed to QListWidget
         # Do not mutate item data or text here; items already reordered visually.
         # Emitting reordered lets the owner update the underlying model.
         self.reordered.emit()
+
+    def keyPressEvent(self, event):
+        try:
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                self.deleteRequested.emit()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().keyPressEvent(event)
 
 class PopupCombobox(QWidget):
     item_selected = Signal(str)
@@ -133,6 +144,8 @@ class Sidebar(QWidget):
     modelChanged = Signal()
     # Emitted when structure changes (reorder, type switch)
     modelStructureChanged = Signal()
+    # Emitted when user requests deletion via keyboard
+    deleteSelectedRequested = Signal()
     spinner_metadata = {
         # Put rotation first so it appears at the top of Core
         'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
@@ -253,6 +266,8 @@ class Sidebar(QWidget):
         
         self.points_list = CustomList()
         main_layout.addWidget(self.points_list)
+        # No global shortcuts here to avoid interfering with text editing fields.
+        # The list (`points_list`) captures Delete/Backspace via its own keyPressEvent.
 
         main_layout.addSpacing(10) # Add space between list and groupbox
 
@@ -478,6 +493,7 @@ class Sidebar(QWidget):
         except Exception:
             pass
         self.points_list.reordered.connect(self.on_points_list_reordered)
+        self.points_list.deleteRequested.connect(lambda: self._delete_via_shortcut())
         # Additional guard: prevent dragging rotation to start or end by enforcing after drop
 
         self.type_combo.currentTextChanged.connect(self.on_type_change)
@@ -488,6 +504,13 @@ class Sidebar(QWidget):
         self.add_element_pop.item_selected.connect(self.on_add_element_selected)
         
         self.rebuild_points_list()
+    
+    def _delete_via_shortcut(self):
+        # Emit a deletion request so the owner can handle model + undo coherently
+        try:
+            self.deleteSelectedRequested.emit()
+        except Exception:
+            pass
     
     def hide_spinners(self):
         for name, (spin, label, btn, spin_row) in self.spinners.items():

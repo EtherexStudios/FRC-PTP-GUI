@@ -73,4 +73,16 @@ class ConfigDialog(QDialog):
             except Exception:
                 pass
 
+    def sync_from_config(self, cfg: Dict[str, float]) -> None:
+        """Update spinner values from the provided config without emitting signals."""
+        for key, spin in self._spins.items():
+            try:
+                spin.blockSignals(True)
+                if key in cfg and cfg[key] is not None:
+                    spin.setValue(float(cfg[key]))
+            except Exception:
+                pass
+            finally:
+                spin.blockSignals(False)
+
 

@@ -35,7 +35,7 @@
       "type": "rotation",
       "rotation_radians": -1.4386578599479587,
       "t_ratio": 0.7656481938067607,
-      "profiled_rotation": true
+      "profiled_rotation": false
     },
     {
       "type": "waypoint",

@@ -95,6 +95,13 @@ class _Segment:
     keyframes: List[_RotationKeyframe]  # list of rotation keyframes
 
 
+@dataclass
+class _GlobalRotationKeyframe:
+    s_m: float
+    theta_target: float
+    profiled_rotation: bool = True
+
+
 def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float]], List[int]]:
     anchors: List[Tuple[float, float]] = []
     anchor_path_indices: List[int] = []
@@ -202,6 +209,134 @@ def _default_heading(ax: float, ay: float, bx: float, by: float) -> float:
     return math.atan2(by - ay, bx - ax)
 
 
+def _build_global_rotation_keyframes(
+    path: Path,
+    anchor_path_indices: List[int],
+    cumulative_lengths: List[float],
+) -> List[_GlobalRotationKeyframe]:
+    """Build a global rotation keyframe list along absolute path distance s (meters).
+
+    RotationTarget elements between any two anchors (not necessarily adjacent)
+    are mapped to a distance s by linearly interpolating between the cumulative
+    distances of the surrounding anchors using the element's t_ratio.
+
+    Waypoint rotations are mapped to the absolute distance at that waypoint.
+    """
+    path_idx_to_anchor_ord: Dict[int, int] = {pi: i for i, pi in enumerate(anchor_path_indices)}
+
+    global_frames: List[_GlobalRotationKeyframe] = []
+
+    for idx, elem in enumerate(path.path_elements):
+        if isinstance(elem, RotationTarget):
+            prev_anchor_ord: Optional[int] = None
+            next_anchor_ord: Optional[int] = None
+            for j in range(idx - 1, -1, -1):
+                e = path.path_elements[j]
+                if isinstance(e, (TranslationTarget, Waypoint)):
+                    prev_anchor_ord = path_idx_to_anchor_ord.get(j)
+                    break
+            for j in range(idx + 1, len(path.path_elements)):
+                e = path.path_elements[j]
+                if isinstance(e, (TranslationTarget, Waypoint)):
+                    next_anchor_ord = path_idx_to_anchor_ord.get(j)
+                    break
+            # Require valid surrounding anchors, but they do NOT need to be adjacent
+            if prev_anchor_ord is None or next_anchor_ord is None:
+                continue
+            s0 = cumulative_lengths[prev_anchor_ord]
+            s1 = cumulative_lengths[next_anchor_ord]
+            seg_span = max(s1 - s0, 1e-9)
+            t_ratio = float(getattr(elem, "t_ratio", 0.0))
+            t_ratio = 0.0 if t_ratio < 0.0 else 1.0 if t_ratio > 1.0 else t_ratio
+            theta = float(elem.rotation_radians)
+            profiled = getattr(elem, "profiled_rotation", True)
+            s_at = s0 + t_ratio * seg_span
+            print(
+                f"DEBUG: Global RotationTarget at s={s_at:.3f} m (prev={prev_anchor_ord}, next={next_anchor_ord}, t={t_ratio:.2f}), "
+                f"theta={math.degrees(theta):.1f}°, profiled={profiled}"
+            )
+            global_frames.append(_GlobalRotationKeyframe(s_at, theta, profiled))
+        elif isinstance(elem, Waypoint):
+            this_anchor_ord = path_idx_to_anchor_ord.get(idx)
+            if this_anchor_ord is None:
+                continue
+            rt = elem.rotation_target
+            theta = float(rt.rotation_radians)
+            profiled = getattr(rt, "profiled_rotation", True)
+            s_at = cumulative_lengths[this_anchor_ord]
+            print(
+                f"DEBUG: Global Waypoint rotation at s={s_at:.3f} m (anchor={this_anchor_ord}), "
+                f"theta={math.degrees(theta):.1f}°, profiled={profiled}"
+            )
+            global_frames.append(_GlobalRotationKeyframe(s_at, theta, profiled))
+
+    if not global_frames:
+        return []
+
+    # Sort and de-duplicate by s; keep the last entry for identical s positions
+    global_frames.sort(key=lambda kf: kf.s_m)
+    dedup: List[_GlobalRotationKeyframe] = []
+    last_s: Optional[float] = None
+    for kf in global_frames:
+        if last_s is not None and abs(kf.s_m - last_s) < 1e-9:
+            dedup[-1] = kf
+        else:
+            dedup.append(kf)
+            last_s = kf.s_m
+    return dedup
+
+
+def _desired_heading_for_global_s(
+    global_frames: List[_GlobalRotationKeyframe],
+    s_m: float,
+    start_heading: float,
+) -> Tuple[float, float, bool]:
+    """Compute desired heading and dtheta/ds at absolute path distance s_m.
+
+    Returns (desired_theta, dtheta_ds, profiled_rotation_for_interval).
+    """
+    if not global_frames:
+        return start_heading, 0.0, True
+
+    frames: List[Tuple[float, float, bool]] = []
+    if global_frames[0].s_m > 0.0 + 1e-9:
+        frames.append((0.0, start_heading, True))
+    for kf in global_frames:
+        frames.append((kf.s_m, kf.theta_target, kf.profiled_rotation))
+
+    # Iterate across brackets
+    for i in range(len(frames) - 1):
+        s0, th0, profiled0 = frames[i]
+        s1, th1, profiled1 = frames[i + 1]
+        if s_m <= s0 + 1e-12:
+            # If we're exactly at this keyframe, hold its heading.
+            if abs(s_m - s0) <= 1e-12:
+                delta = shortest_angular_distance(th1, th0)
+                dtheta_ds = (delta / max((s1 - s0), 1e-9))
+                return th0, dtheta_ds, profiled1
+            # Only snap ahead to the next (non-profiled) keyframe if we're strictly
+            # before the current keyframe. This avoids snapping at s == s0.
+            if s_m < s0 - 1e-12 and not profiled1:
+                return th1, 0.0, profiled1
+            delta = shortest_angular_distance(th1, th0)
+            dtheta_ds = (delta / max((s1 - s0), 1e-9))
+            return th0, dtheta_ds, profiled1
+        if s0 < s_m <= s1 + 1e-12:
+            if not profiled1:
+                return th1, 0.0, profiled1
+            alpha = (s_m - s0) / max((s1 - s0), 1e-9)
+            delta = shortest_angular_distance(th1, th0)
+            desired_theta = wrap_angle_radians(th0 + delta * alpha)
+            dtheta_ds = (delta / max((s1 - s0), 1e-9))
+            return desired_theta, dtheta_ds, profiled1
+
+    # After the last frame, hold
+    _, th_last, profiled_last = frames[-1]
+    if not profiled_last:
+        return th_last, 0.0, profiled_last
+    return th_last, 0.0, profiled_last
+
+
 def _desired_heading_for_progress(
     seg: _Segment,
     progress_t: float,
@@ -222,8 +357,14 @@ def _desired_heading_for_progress(
         t0, th0, profiled0 = frames[i]
         t1, th1, profiled1 = frames[i + 1]
         if t <= t0 + 1e-12:
-            # If the upcoming keyframe is non-profiled, snap target to that keyframe immediately
-            if not profiled1:
+            # If we're exactly at this keyframe, hold its heading.
+            if abs(t - t0) <= 1e-12:
+                delta = shortest_angular_distance(th1, th0)
+                dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
+                return th0, dtheta_ds, profiled1  # Interpolate away from th0
+            # Only snap ahead if we're strictly before the current keyframe and the
+            # upcoming keyframe is non-profiled.
+            if t < t0 - 1e-12 and not profiled1:
                 return th1, 0.0, profiled1
             delta = shortest_angular_distance(th1, th0)
             dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
@@ -254,64 +395,55 @@ def _trapezoidal_rotation_profile(
     dt: float
 ) -> float:
     """
-    Implements a smooth trapezoidal motion profile for fast rotation.
-    Returns the desired angular velocity change for this timestep.
+    Time-optimal, discrete-time trapezoidal profile without heuristics.
+    Chooses an angular velocity for this timestep that respects:
+    - acceleration limit (|Δω| ≤ max_alpha * dt)
+    - velocity limit (|ω| ≤ max_omega)
+    - no-overshoot within this step plus future optimal deceleration:
+      v*dt + v^2/(2*max_alpha) ≤ |angular_error|
     """
     angular_error = shortest_angular_distance(target_theta, current_theta)
-    
-    # DEBUG: Print detailed trapezoidal profile state
-    if abs(angular_error) > math.radians(1.0):  # Only debug significant rotations
-        print(f"DEBUG: Trapezoidal profile - error={math.degrees(angular_error):.1f}°, "
-              f"current_omega={math.degrees(current_omega):.1f}°/s, "
-              f"max_omega={math.degrees(max_omega):.1f}°/s, "
-              f"max_alpha={math.degrees(max_alpha):.1f}°/s²")
-    
-    # If we're very close to the target, stop smoothly
-    if abs(angular_error) < math.radians(0.5):  # 0.5 degree tolerance
-        # Gradual stop rather than instant
-        return current_omega * 0.8
-    
-    # Calculate the distance needed to decelerate to zero from current velocity
-    decel_distance = abs(current_omega) * abs(current_omega) / (2.0 * max_alpha)
-    
-    # Direction of rotation
+
+    if dt <= 0.0 or max_alpha <= 0.0 or max_omega <= 0.0:
+        return 0.0
+
+    error_mag = abs(angular_error)
+    if error_mag == 0.0:
+        # No remaining error: decelerate toward zero as fast as possible
+        if abs(current_omega) <= max_alpha * dt:
+            return 0.0
+        return current_omega - math.copysign(max_alpha * dt, current_omega)
+
     direction = math.copysign(1.0, angular_error)
-    
-    # DEBUG: Show decision logic
-    debug_msg = ""
-    
-    # Determine the target velocity for this phase
-    if abs(angular_error) > decel_distance + math.radians(5.0):
-        # Acceleration/constant velocity phase - target max velocity
-        target_omega = direction * max_omega
-        debug_msg = "accelerating to max velocity"
+    v_curr_aligned = direction * current_omega  # velocity along desired direction (can be negative)
+
+    # Upper bound on velocity this step to avoid overshoot in discrete time:
+    # Solve v*dt + v^2/(2*a) <= error_mag for v >= 0
+    a_dt = max_alpha * dt
+    v_step_bound = max(0.0, -a_dt + math.sqrt(a_dt * a_dt + 2.0 * max_alpha * error_mag))
+
+    # Also respect classical distance and speed limits
+    v_distance_bound = math.sqrt(2.0 * max_alpha * error_mag)
+    v_allow = min(v_step_bound, v_distance_bound, max_omega)
+
+    # Acceleration-limited change from current velocity toward the largest allowed value
+    v_reachable_min = v_curr_aligned - a_dt
+    v_reachable_max = v_curr_aligned + a_dt
+
+    # Choose the maximum reachable velocity that does not exceed v_allow
+    if v_reachable_max <= v_allow:
+        v_next_aligned = v_reachable_max
+    elif v_reachable_min <= v_allow <= v_reachable_max:
+        v_next_aligned = v_allow
     else:
-        # Deceleration phase - calculate appropriate target velocity
-        # Use a velocity that will allow us to stop at the target
-        remaining_distance = abs(angular_error)
-        # v² = 2*a*d, so v = sqrt(2*a*d)
-        target_speed = math.sqrt(2.0 * max_alpha * remaining_distance)
-        target_speed = min(target_speed, max_omega)  # Don't exceed max velocity
-        target_omega = direction * target_speed
-        debug_msg = f"decelerating, target_speed={math.degrees(target_speed):.1f}°/s"
-    
-    # Smoothly approach the target velocity using acceleration limiting
-    omega_error = target_omega - current_omega
-    max_omega_change = max_alpha * dt
-    
-    if abs(omega_error) <= max_omega_change:
-        # Can reach target velocity in this timestep
-        desired_omega = target_omega
-        debug_msg += " (reached target velocity)"
-    else:
-        # Gradually change towards target velocity
-        omega_change = math.copysign(max_omega_change, omega_error)
-        desired_omega = current_omega + omega_change
-        debug_msg += f" (changing by {math.degrees(omega_change):.1f}°/s)"
-    
-    if abs(angular_error) > math.radians(1.0):
-        print(f"DEBUG: {debug_msg} -> desired_omega={math.degrees(desired_omega):.1f}°/s")
-    
+        # Can't reach within bound this step; decelerate as much as possible
+        v_next_aligned = v_reachable_min
+
+    # Convert back to signed angular velocity and enforce overall speed limit
+    desired_omega = direction * v_next_aligned
+    if abs(desired_omega) > max_omega:
+        desired_omega = math.copysign(max_omega, desired_omega)
+
     return desired_omega
 
 
@@ -398,12 +530,11 @@ def simulate_path(
         cumulative_lengths.append(total_path_len)
 
     first_seg = segments[0]
-    initial_heading = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
-    if first_seg.keyframes:
-        for kf in sorted(first_seg.keyframes, key=lambda kf: kf.t_ratio):
-            if kf.t_ratio <= 1e-6:
-                initial_heading = kf.theta_target
-                break
+    start_heading_base = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
+
+    # Build global rotation keyframes (across multiple segments) and compute initial heading at s=0
+    global_keyframes = _build_global_rotation_keyframes(path, anchor_path_indices, cumulative_lengths)
+    initial_heading, _, _ = _desired_heading_for_global_s(global_keyframes, 0.0, start_heading_base)
 
     x = first_seg.ax
     y = first_seg.ay
@@ -476,25 +607,9 @@ def simulate_path(
 
         progress_t = projected_s / seg.length_m if seg.length_m > 1e-9 else 0.0
 
-        # Determine the start heading for this segment
-        if projected_s <= 1e-9 and t_s > 0.0:
-            # At the beginning of a new segment
-            prev_seg = segments[seg_idx - 1] if seg_idx > 0 else None
-            if prev_seg is not None and prev_seg.keyframes:
-                # Use the last rotation target from the previous segment
-                segment_start_heading = prev_seg.keyframes[-1].theta_target
-            else:
-                # No previous rotation targets, maintain current heading
-                segment_start_heading = theta
-        else:
-            # Continuing within the same segment or at the very start
-            if seg_idx == 0:
-                segment_start_heading = initial_heading
-            else:
-                # For subsequent segments, maintain current heading if no rotation targets
-                segment_start_heading = theta
-
-        desired_theta, dtheta_ds, profiled_rotation = _desired_heading_for_progress(seg, progress_t, segment_start_heading)
+        # Compute desired heading using global keyframes at absolute distance along path
+        global_s = cumulative_lengths[seg_idx] + projected_s
+        desired_theta, dtheta_ds, profiled_rotation = _desired_heading_for_global_s(global_keyframes, global_s, start_heading_base)
 
         v_proj = dot(speeds.vx_mps, speeds.vy_mps, ux, uy)
         v_curr = max(v_proj, 0.0)
@@ -552,9 +667,6 @@ def simulate_path(
             )
         else:
             # NON-PROFILED ROTATION: Use trapezoidal motion profile for fast rotation
-            # DEBUG: Print when using non-profiled rotation
-            if t_s == 0.0:  # Only print once at start to avoid spam
-                print(f"DEBUG: Using NON-PROFILED rotation for target {math.degrees(desired_theta):.1f}°")
             omega_des = _trapezoidal_rotation_profile(
                 current_theta=theta,
                 target_theta=desired_theta,
