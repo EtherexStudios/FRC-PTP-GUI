@@ -146,6 +146,10 @@ class Sidebar(QWidget):
     modelStructureChanged = Signal()
     # Emitted when user requests deletion via keyboard
     deleteSelectedRequested = Signal()
+    # Emitted right before the model is mutated; provides a human-readable description
+    aboutToChange = Signal(str)
+    # Emitted after the model is mutated; provides a human-readable description
+    userActionOccurred = Signal(str)
     spinner_metadata = {
         # Put rotation first so it appears at the top of Core
         'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
@@ -456,7 +460,7 @@ class Sidebar(QWidget):
         constraints_title_layout = QHBoxLayout(self.constraints_title_bar)
         constraints_title_layout.setContentsMargins(8, 0, 8, 0)  # Reduced margins
         constraints_title_layout.setSpacing(8)  # Reduced spacing to prevent clipping
-        constraints_label = QLabel("Path constraints")
+        constraints_label = QLabel("Path Constraints")
         constraints_label.setStyleSheet(
             """
             font-size: 14px;
@@ -876,6 +880,13 @@ class Sidebar(QWidget):
             return
         
         element = self.path.get_element(idx)
+        # Build description
+        label_text = Sidebar._label(key).replace('<br/>', ' ')
+        desc = f"Remove {label_text}" if key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'] else f"Remove {label_text}"
+        try:
+            self.aboutToChange.emit(desc)
+        except Exception:
+            pass
         # Map degree-based keys for element rotation angle only
         if key == 'rotation_degrees':
             mapped = Sidebar.degrees_to_radians_attr_map[key]
@@ -897,6 +908,10 @@ class Sidebar(QWidget):
         
         self.on_item_selected()
         self.modelChanged.emit()
+        try:
+            self.userActionOccurred.emit(desc)
+        except Exception:
+            pass
 
     def on_attribute_added(self, key):
         idx = self.get_selected_index()
@@ -916,6 +931,14 @@ class Sidebar(QWidget):
                 cfg_default = self.project_manager.get_default_optional_value(real_key)
         except Exception:
             cfg_default = None
+
+        # Build description
+        label_text = Sidebar._label(real_key).replace('<br/>', ' ')
+        desc = f"Add {label_text}"
+        try:
+            self.aboutToChange.emit(desc)
+        except Exception:
+            pass
 
         # Path-level constraints or element attributes
         if real_key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
@@ -946,6 +969,10 @@ class Sidebar(QWidget):
                 pass
         QTimer.singleShot(0, _refresh_and_focus_constraints)
         self.modelChanged.emit()
+        try:
+            self.userActionOccurred.emit(desc)
+        except Exception:
+            pass
 
 
     def on_type_change(self, value):
@@ -968,6 +995,12 @@ class Sidebar(QWidget):
                     return
             if prev_type == new_type:
                 return
+
+            # Announce about-to-change for undo snapshot
+            try:
+                self.aboutToChange.emit(f"Change element type to {new_type.value}")
+            except Exception:
+                pass
 
             # Gather all attributes from TranslationTarget and RotationTarget
             translation_attrs = [
@@ -1055,6 +1088,10 @@ class Sidebar(QWidget):
             self.rebuild_points_list()
             self.select_index(idx)
             self.modelStructureChanged.emit()
+            try:
+                self.userActionOccurred.emit(f"Change element type to {new_type.value}")
+            except Exception:
+                pass
 
     def _rebuild_type_combo_for_index(self, idx: int, current_type: ElementType):
         if self.path is None:
@@ -1137,6 +1174,37 @@ class Sidebar(QWidget):
         idx = self.get_selected_index()
         if idx is not None and self.path is not None:
             element = self.path.get_element(idx)
+            # Build a clear description for undo/redo
+            label_text = Sidebar._label(key).replace('<br/>', ' ')
+            # Determine scope/entity for description
+            def _entity_name(el):
+                if isinstance(el, Waypoint):
+                    return 'Waypoint'
+                if isinstance(el, RotationTarget):
+                    return 'Rotation'
+                if isinstance(el, TranslationTarget):
+                    return 'Translation'
+                return 'Element'
+            entity = _entity_name(element)
+            desc: str = f"Edit {label_text}"
+            # Path constraints group
+            path_constraint_keys = [
+                'initial_velocity_meters_per_sec',
+                'final_velocity_meters_per_sec',
+                'max_velocity_meters_per_sec',
+                'max_acceleration_meters_per_sec2',
+                'max_velocity_deg_per_sec',
+                'max_acceleration_deg_per_sec2',
+            ]
+            if key in path_constraint_keys:
+                desc = f"Edit Path Constraint: {label_text}"
+            else:
+                # Degrees-based or core element attributes
+                desc = f"Edit {entity} {label_text}"
+            try:
+                self.aboutToChange.emit(desc)
+            except Exception:
+                pass
             # Handle rotation position ratio updates
             if key == 'rotation_position_ratio':
                 clamped_ratio = Sidebar._clamp_from_metadata(key, float(value))
@@ -1149,6 +1217,10 @@ class Sidebar(QWidget):
                     element.t_ratio = float(clamped_ratio)
                 # No re-projection needed; canvas computes from ratio
                 self.modelChanged.emit()
+                try:
+                    self.userActionOccurred.emit(desc)
+                except Exception:
+                    pass
                 return
             if key in Sidebar.degrees_to_radians_attr_map:
                 # Degrees-mapped keys only apply to rotation_degrees on element; other deg constraints are path-level
@@ -1168,14 +1240,6 @@ class Sidebar(QWidget):
                         setattr(self.path.constraints, key, clamped)
             else:
                 # Core element attributes or path-level constraints
-                path_constraint_keys = [
-                    'initial_velocity_meters_per_sec',
-                    'final_velocity_meters_per_sec',
-                    'max_velocity_meters_per_sec',
-                    'max_acceleration_meters_per_sec2',
-                    'max_velocity_deg_per_sec',
-                    'max_acceleration_deg_per_sec2',
-                ]
                 if key in path_constraint_keys:
                     if self.path is not None and hasattr(self.path, 'constraints'):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
@@ -1202,6 +1266,10 @@ class Sidebar(QWidget):
                         if isinstance(element, TranslationTarget) and key in ('x_meters', 'y_meters'):
                             self._reproject_all_rotation_positions()
             self.modelChanged.emit()
+            try:
+                self.userActionOccurred.emit(desc)
+            except Exception:
+                pass
 
     def rebuild_points_list(self):
         self.hide_spinners()
@@ -1283,6 +1351,10 @@ class Sidebar(QWidget):
     def on_points_list_reordered(self):
         if self.path is None:
             return
+        try:
+            self.aboutToChange.emit("Reorder elements")
+        except Exception:
+            pass
         # New order by original indices from UI items
         new_order = []
         for i in range(self.points_list.count()):
@@ -1299,6 +1371,10 @@ class Sidebar(QWidget):
         # Rebuild UI to reflect corrected model order
         self.rebuild_points_list()
         self.modelStructureChanged.emit()
+        try:
+            self.userActionOccurred.emit("Reorder elements")
+        except Exception:
+            pass
 
     # External API for other widgets
     def select_index(self, index: int):
@@ -1368,6 +1444,11 @@ class Sidebar(QWidget):
                 return (ax + bx) / 2.0, (ay + by) / 2.0
             return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
         x0, y0 = current_pos_defaults()
+        # Announce about-to-change for undo snapshot
+        try:
+            self.aboutToChange.emit(f"Add {new_type.value}")
+        except Exception:
+            pass
         if new_type == ElementType.TRANSLATION:
             new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
         elif new_type == ElementType.WAYPOINT:
@@ -1394,12 +1475,23 @@ class Sidebar(QWidget):
         new_index = next((i for i, e in enumerate(self.path.path_elements) if id(e) == identity), insert_pos)
         self.select_index(new_index)
         self.modelStructureChanged.emit()
+        try:
+            self.userActionOccurred.emit(f"Add {new_type.value}")
+        except Exception:
+            pass
 
     def _on_remove_element(self, idx_to_remove: int):
         if self.path is None:
             return
         if idx_to_remove < 0 or idx_to_remove >= len(self.path.path_elements):
             return
+        # Announce about-to-change for undo snapshot
+        try:
+            el = self.path.path_elements[idx_to_remove]
+            tname = 'Waypoint' if isinstance(el, Waypoint) else 'Rotation' if isinstance(el, RotationTarget) else 'Translation'
+            self.aboutToChange.emit(f"Delete {tname}")
+        except Exception:
+            pass
         removed = self.path.path_elements.pop(idx_to_remove)
         # After removal, ensure we do not end with rotation at start or end
         self._repair_rotation_at_ends()
@@ -1412,6 +1504,11 @@ class Sidebar(QWidget):
             new_sel = min(idx_to_remove, len(self.path.path_elements) - 1)
             self.select_index(new_sel)
         self.modelStructureChanged.emit()
+        try:
+            tname = 'Waypoint' if isinstance(removed, Waypoint) else 'Rotation' if isinstance(removed, RotationTarget) else 'Translation'
+            self.userActionOccurred.emit(f"Delete {tname}")
+        except Exception:
+            pass
 
     def _repair_rotation_at_ends(self):
         if self.path is None or not self.path.path_elements:
@@ -1565,9 +1662,19 @@ class Sidebar(QWidget):
                 cfg_default = self.project_manager.get_default_optional_value(real_key)
         except Exception:
             cfg_default = None
+        # Announce about-to-change
+        label_text = Sidebar._label(real_key).replace('<br/>', ' ')
+        try:
+            self.aboutToChange.emit(f"Add {label_text}")
+        except Exception:
+            pass
         base_val = float(cfg_default) if cfg_default is not None else 0.0
         if hasattr(self.path, 'constraints'):
             setattr(self.path.constraints, real_key, base_val)
         # Refresh constraints UI
         self.refresh_current_selection()
         self.modelChanged.emit()
+        try:
+            self.userActionOccurred.emit(f"Add {label_text}")
+        except Exception:
+            pass

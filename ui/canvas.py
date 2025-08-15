@@ -462,6 +462,12 @@ class RotationHandle(QGraphicsEllipseItem):
         if hasattr(self, 'center_item') and self.center_item is not None:
             self.center_item.setFlag(QGraphicsItem.ItemIsMovable, True)
         self._dragging = False
+        # Notify the canvas that a rotation drag finished so it can record undo
+        try:
+            if hasattr(self, 'canvas_view') and self.canvas_view is not None:
+                self.canvas_view._on_rotation_handle_released(self.center_item.index_in_model)
+        except Exception:
+            pass
         super().mouseReleaseEvent(event)
 
 
@@ -510,6 +516,8 @@ class CanvasView(QGraphicsView):
     elementDragFinished = Signal(int)  # index
     # Emitted when user presses Delete/Backspace to delete current selection
     deleteSelectedRequested = Signal()
+    # Emitted when a rotation drag via the rotation handle finishes
+    rotationDragFinished = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1804,3 +1812,10 @@ class CanvasView(QGraphicsView):
         except Exception:
             pass
         super().keyPressEvent(event)
+
+    # Internal hook called by RotationHandle on mouse release
+    def _on_rotation_handle_released(self, index: int):
+        try:
+            self.rotationDragFinished.emit(int(index))
+        except Exception:
+            pass

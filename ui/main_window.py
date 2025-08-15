@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self.sidebar.modelChanged.connect(self.canvas.request_simulation_rebuild)
         self.sidebar.modelStructureChanged.connect(lambda: self.canvas.set_path(self.path))
         self.sidebar.modelStructureChanged.connect(self.canvas.request_simulation_rebuild)
+        # Sidebar -> undo management
+        self.sidebar.aboutToChange.connect(self._on_sidebar_about_to_change)
+        self.sidebar.userActionOccurred.connect(self._on_sidebar_action_committed)
 
         # Canvas interactions -> update model and sidebar
         self.canvas.elementMoved.connect(self._on_canvas_element_moved, Qt.QueuedConnection)
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         # Handle start and end of drags for undo/redo
         self.canvas.elementSelected.connect(self._on_canvas_element_pressed, Qt.QueuedConnection)
         self.canvas.elementDragFinished.connect(self._on_canvas_drag_finished, Qt.QueuedConnection)
+        self.canvas.rotationDragFinished.connect(self._on_canvas_rotation_finished, Qt.QueuedConnection)
         # Canvas delete key -> sidebar delete current element
         self.canvas.deleteSelectedRequested.connect(self._delete_selected_element)
         # Sidebar delete key -> same handler
@@ -515,6 +519,24 @@ class MainWindow(QMainWindow):
         # Defer command creation to next event loop iteration
         # so the change is applied first
         QTimer.singleShot(0, create_command)
+
+    def _on_sidebar_about_to_change(self, description: str):
+        """Capture pre-change snapshot for undo before a sidebar-driven edit."""
+        self._sidebar_old_state = copy.deepcopy(self.path)
+        self._sidebar_action_desc = description
+
+    def _on_sidebar_action_committed(self, description: str):
+        """Commit undo command after sidebar-driven edit completes with a clear description."""
+        try:
+            old_state = getattr(self, '_sidebar_old_state', None)
+            desc = description or getattr(self, '_sidebar_action_desc', "Edit")
+            if old_state is not None:
+                self._record_path_change(desc, old_state)
+        finally:
+            if hasattr(self, '_sidebar_old_state'):
+                delattr(self, '_sidebar_old_state')
+            if hasattr(self, '_sidebar_action_desc'):
+                delattr(self, '_sidebar_action_desc')
     
     def _record_config_change(self, description: str, old_config: dict = None):
         """Record a config change in the undo system."""
@@ -561,13 +583,15 @@ class MainWindow(QMainWindow):
         self._config_undo_recorded = False
 
     def _on_config_live_change(self, key: str, value: float):
-        # On first live change within an edit session, record undo based on the pre-edit snapshot
-        if not self._config_undo_recorded and self._config_edit_old_config is not None:
-            self._record_config_change("Edit Config", self._config_edit_old_config)
-            self._config_undo_recorded = True
-
+        # Record each individual config change for granular undo/redo
+        old_config = copy.deepcopy(self.project_manager.config)
         # Persist to config immediately
         self.project_manager.save_config({key: value})
+        # Create undo command with specific description
+        key_label = self._get_config_key_label(key)
+        desc = f"Edit Config: {key_label}"
+        self._record_config_change(desc, old_config)
+        
         if key in ("robot_length_meters", "robot_width_meters"):
             self._apply_robot_dims_from_config(self.project_manager.config)
         # Config changes affect simulation constraints/gains; rebuild sim
@@ -582,6 +606,20 @@ class MainWindow(QMainWindow):
                 active.sync_from_config(self.project_manager.config)
         except Exception:
             pass
+
+    def _get_config_key_label(self, key: str) -> str:
+        """Get a human-readable label for a config key."""
+        labels = {
+            'robot_length_meters': 'Robot Length',
+            'robot_width_meters': 'Robot Width',
+            'final_velocity_meters_per_sec': 'Default Final Velocity',
+            'max_velocity_meters_per_sec': 'Default Max Velocity',
+            'max_acceleration_meters_per_sec2': 'Default Max Accel',
+            'intermediate_handoff_radius_meters': 'Default Handoff Radius',
+            'max_velocity_deg_per_sec': 'Default Max Rot Vel',
+            'max_acceleration_deg_per_sec2': 'Default Max Rot Accel',
+        }
+        return labels.get(key, key)
 
     def _load_path_file(self, filename: str):
         p = self.project_manager.load_path(filename)
@@ -932,14 +970,13 @@ class MainWindow(QMainWindow):
                     self.statusBar.showMessage("No path loaded")
 
     def _on_canvas_element_pressed(self, index: int):
-        """Called when an element is first selected/pressed for potential dragging."""
-        # Capture the initial state before any drag operation
+        """Called when an element is first pressed for drag/rotate. Snapshot for undo grouping."""
         self._drag_start_state = copy.deepcopy(self.path)
+        self._rotate_start_state = copy.deepcopy(self.path)
     
     def _on_element_selected_for_undo(self, index: int):
-        """Called when an element is selected - capture state for potential edits."""
-        # Capture state when element is selected for potential editing
-        self._last_selected_state = copy.deepcopy(self.path)
+        """Selection changes should not create undo entries; do nothing here."""
+        return
 
     def _on_canvas_element_moved(self, index: int, x_m: float, y_m: float):
         # Suppress during window state transitions to avoid re-entrant churn
@@ -1012,10 +1049,24 @@ class MainWindow(QMainWindow):
             elem.rotation_radians = clamped_radians
         elif isinstance(elem, Waypoint):
             elem.rotation_target.rotation_radians = clamped_radians
+        # Name the in-progress action for UI clarity
+        try:
+            if isinstance(elem, RotationTarget):
+                self.action_undo.setText("Undo Rotate RotationTarget")
+            elif isinstance(elem, Waypoint):
+                self.action_undo.setText("Undo Rotate Waypoint")
+        except Exception:
+            pass
         # Update sidebar fields
         self.sidebar.update_current_values_only()
         # Debounced autosave on rotation changes
         self._schedule_autosave()
+
+        # Debounce: capture the state at start of rotation (via _on_canvas_element_pressed) and
+        # commit the undo entry when rotation drag finishes (see _on_canvas_rotation_finished).
+        if not hasattr(self, '_rotate_start_state'):
+            # First rotation change – snapshot pre-rotation state
+            self._rotate_start_state = copy.deepcopy(self.path)
 
     def _reproject_all_rotation_positions(self):
         # No-op under ratio-based rotation positioning. Canvas derives positions from t_ratio.
@@ -1084,6 +1135,22 @@ class MainWindow(QMainWindow):
             new_index = -1
         if new_index >= 0:
             self.sidebar.select_index(new_index)
+
+    def _on_canvas_rotation_finished(self, index: int):
+        """Record rotation change undo when the user releases the rotation handle."""
+        if getattr(self, '_layout_stabilizing', False):
+            return
+        if not hasattr(self, '_rotate_start_state'):
+            return
+        try:
+            elem = self.path.path_elements[index]
+            if isinstance(elem, RotationTarget):
+                self._record_path_change("Rotate RotationTarget", self._rotate_start_state)
+            elif isinstance(elem, Waypoint):
+                self._record_path_change("Rotate Waypoint", self._rotate_start_state)
+        finally:
+            if hasattr(self, '_rotate_start_state'):
+                delattr(self, '_rotate_start_state')
 
     # ---------------- Autosave ----------------
     def _schedule_autosave(self):
