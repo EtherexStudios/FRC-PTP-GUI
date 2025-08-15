@@ -97,6 +97,9 @@ class MainWindow(QMainWindow):
 
         # Stabilization flag for fullscreen/window state transitions
         self._layout_stabilizing: bool = False
+        # Track config-edit undo session state
+        self._config_undo_recorded: bool = False
+        self._config_edit_old_config: dict | None = None
         # Mark sidebar ready after initial layout
         QTimer.singleShot(0, self.sidebar.mark_ready)
 
@@ -399,15 +402,12 @@ class MainWindow(QMainWindow):
         self.canvas.set_robot_dimensions(length_m, width_m)
 
     def _action_open_project(self, force_dialog: bool = False):
-        directory = None
-        if not force_dialog and self.project_manager.has_valid_project():
-            directory = self.project_manager.project_dir
-        if directory is None:
-            directory = QFileDialog.getExistingDirectory(self, "Open Project Directory")
-            if not directory:
-                # Keep empty path visible
-                self._set_path_model(Path())
-                return
+        # Always prompt the user to select a project directory. Initialize to current project or home.
+        start_dir = self.project_manager.project_dir or os.path.expanduser("~")
+        directory = QFileDialog.getExistingDirectory(self, "Open Project Directory", start_dir)
+        if not directory:
+            # User canceled; leave current project/path unchanged
+            return
         self.project_manager.set_project_dir(directory)
         cfg = self.project_manager.load_config()
         self._apply_robot_dims_from_config(cfg)
@@ -523,6 +523,9 @@ class MainWindow(QMainWindow):
 
     def _action_edit_config(self):
         old_config = copy.deepcopy(self.project_manager.config)
+        # Begin a config-edit session: capture original for undo on first live change
+        self._config_edit_old_config = copy.deepcopy(old_config)
+        self._config_undo_recorded = False
         cfg = self.project_manager.load_config()
         dlg = ConfigDialog(self, cfg, on_change=self._on_config_live_change)
         if dlg.exec() == QDialog.Accepted:
@@ -537,10 +540,19 @@ class MainWindow(QMainWindow):
             # Refresh sidebar for current selection so defaults/UI reflect changes
             self.sidebar.refresh_current_selection()
             
-            # Record the config change for undo/redo
-            self._record_config_change("Edit Config", old_config)
+            # Record the config change for undo/redo if not already recorded via live-change
+            if not self._config_undo_recorded:
+                self._record_config_change("Edit Config", old_config)
+        # Clear session flags after dialog closes
+        self._config_edit_old_config = None
+        self._config_undo_recorded = False
 
     def _on_config_live_change(self, key: str, value: float):
+        # On first live change within an edit session, record undo based on the pre-edit snapshot
+        if not self._config_undo_recorded and self._config_edit_old_config is not None:
+            self._record_config_change("Edit Config", self._config_edit_old_config)
+            self._config_undo_recorded = True
+
         # Persist to config immediately
         self.project_manager.save_config({key: value})
         if key in ("robot_length_meters", "robot_width_meters"):
