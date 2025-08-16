@@ -519,6 +519,20 @@ def simulate_path(
     # DEBUG: Print angular constraints
     print(f"DEBUG: Angular constraints - max_omega={math.degrees(max_omega):.1f}°/s, max_alpha={math.degrees(max_alpha):.1f}°/s²")
 
+    # End tolerances
+    end_translation_tolerance_m = _resolve_constraint(
+        getattr(c, "end_translation_tolerance_meters", None),
+        cfg.get("end_translation_tolerance_meters"),
+        0.03,
+    )
+    end_rotation_tolerance_rad = math.radians(
+        _resolve_constraint(
+            getattr(c, "end_rotation_tolerance_deg", None),
+            cfg.get("end_rotation_tolerance_deg"),
+            2.0,
+        )
+    )
+
     # Default handoff radius from config
     default_handoff_radius = _resolve_constraint(None, cfg.get("intermediate_handoff_radius_meters"), 0.05)
 
@@ -535,6 +549,8 @@ def simulate_path(
     # Build global rotation keyframes (across multiple segments) and compute initial heading at s=0
     global_keyframes = _build_global_rotation_keyframes(path, anchor_path_indices, cumulative_lengths)
     initial_heading, _, _ = _desired_heading_for_global_s(global_keyframes, 0.0, start_heading_base)
+    # Desired heading at the absolute end of the path
+    end_heading_target, _, _ = _desired_heading_for_global_s(global_keyframes, total_path_len, start_heading_base)
 
     x = first_seg.ax
     y = first_seg.ay
@@ -549,6 +565,8 @@ def simulate_path(
 
     t_s = 0.0
     seg_idx = 0
+    # Absolute end point
+    end_x, end_y = anchors[-1]
 
     def remaining_distance_from(seg_index: int, current_x: float, current_y: float, proj_s: float) -> float:
         if seg_index >= len(segments):
@@ -580,7 +598,9 @@ def simulate_path(
         # Get the current handoff radius for this segment
         current_handoff_radius = _get_handoff_radius_for_segment(path, seg_idx, anchor_path_indices, default_handoff_radius)
 
-        while seg_idx < len(segments) and dist_to_target <= current_handoff_radius:
+        # Only advance to the next segment via handoff radius if we are NOT on the last segment.
+        # For the final segment, we finish based on end tolerances instead of handoff radius.
+        while seg_idx < (len(segments) - 1) and dist_to_target <= current_handoff_radius:
             seg_idx += 1
             if seg_idx >= len(segments):
                 break
@@ -704,9 +724,13 @@ def simulate_path(
         # Add current position to trail
         trail_points.append((float(x), float(y)))
 
-        at_end = seg_idx >= len(segments)
-        if at_end:
-            if v_mag <= max(0.05, final_v + 0.05) and abs(limited.omega_radps) <= math.radians(5.0):
+        # Check end-of-path conditions: within end translation tolerance AND end rotation tolerance
+        dx_end = end_x - x
+        dy_end = end_y - y
+        dist_to_final = hypot2(dx_end, dy_end)
+        if dist_to_final <= end_translation_tolerance_m:
+            rot_err = abs(shortest_angular_distance(end_heading_target, theta))
+            if rot_err <= end_rotation_tolerance_rad:
                 break
 
         t_s += dt_s

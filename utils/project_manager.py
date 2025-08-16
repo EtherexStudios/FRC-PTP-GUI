@@ -18,7 +18,9 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "max_acceleration_meters_per_sec2": 7.0,
     "intermediate_handoff_radius_meters": 0.2,
     "max_velocity_deg_per_sec": 720.0,
-    "max_acceleration_deg_per_sec2": 360.0
+    "max_acceleration_deg_per_sec2": 1500.0,
+    "end_translation_tolerance_meters": 0.03,
+    "end_rotation_tolerance_deg": 2.0
 }
 
 EXAMPLE_CONFIG: Dict[str, float] = {
@@ -29,7 +31,9 @@ EXAMPLE_CONFIG: Dict[str, float] = {
     "max_acceleration_meters_per_sec2": 7.0,
     "intermediate_handoff_radius_meters": 0.2,
     "max_velocity_deg_per_sec": 720.0,
-    "max_acceleration_deg_per_sec2": 360.0
+    "max_acceleration_deg_per_sec2": 1500.0,
+    "end_translation_tolerance_meters": 0.03,
+    "end_rotation_tolerance_deg": 2.0
 }
 
 
@@ -335,6 +339,7 @@ class ProjectManager:
                 "final_velocity_meters_per_sec",
                 "max_velocity_meters_per_sec",
                 "max_acceleration_meters_per_sec2",
+                "end_translation_tolerance_meters",
             ]:
                 val = getattr(c, name, None)
                 if val is not None:
@@ -343,6 +348,7 @@ class ProjectManager:
             for name in [
                 "max_velocity_deg_per_sec",
                 "max_acceleration_deg_per_sec2",
+                "end_rotation_tolerance_deg",
             ]:
                 val = getattr(c, name, None)
                 if val is not None:
@@ -370,8 +376,10 @@ class ProjectManager:
                     "final_velocity_meters_per_sec",
                     "max_velocity_meters_per_sec",
                     "max_acceleration_meters_per_sec2",
+                    "end_translation_tolerance_meters",
                     "max_velocity_deg_per_sec",
                     "max_acceleration_deg_per_sec2",
+                    "end_rotation_tolerance_deg",
                 ]:
                     if name in constraints_block:
                         setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))
@@ -384,10 +392,14 @@ class ProjectManager:
                     continue
                 typ = item.get("type")
                 if typ == "translation":
+                    handoff_radius = self._opt_float(item.get("intermediate_handoff_radius_meters"))
+                    if handoff_radius is None:
+                        # Use default from config if not specified in the saved path
+                        handoff_radius = self.get_default_optional_value("intermediate_handoff_radius_meters")
                     el = TranslationTarget(
                         x_meters=float(item.get("x_meters", 0.0)),
                         y_meters=float(item.get("y_meters", 0.0)),
-                        intermediate_handoff_radius_meters=self._opt_float(item.get("intermediate_handoff_radius_meters")),
+                        intermediate_handoff_radius_meters=handoff_radius,
                     )
                     path.path_elements.append(el)
                 elif typ == "rotation":
@@ -443,11 +455,15 @@ class ProjectManager:
                                 ))
                         except Exception:
                             pass
+                    handoff_radius = self._opt_float(tt.get("intermediate_handoff_radius_meters"))
+                    if handoff_radius is None:
+                        # Use default from config if not specified in the saved path
+                        handoff_radius = self.get_default_optional_value("intermediate_handoff_radius_meters")
                     el = Waypoint(
                         translation_target=TranslationTarget(
                             x_meters=float(tt.get("x_meters", 0.0)),
                             y_meters=float(tt.get("y_meters", 0.0)),
-                            intermediate_handoff_radius_meters=self._opt_float(tt.get("intermediate_handoff_radius_meters")),
+                            intermediate_handoff_radius_meters=handoff_radius,
                         ),
                         rotation_target=rot,
                     )

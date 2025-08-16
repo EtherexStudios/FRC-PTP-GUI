@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Optional, Tuple
 import math
 from PySide6.QtGui import QIcon, QGuiApplication
-from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS, ELEMENT_CIRCLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M
 from typing import Any
 
 class ElementType(Enum):
@@ -195,6 +195,158 @@ class Sidebar(QWidget):
         if value > value_max:
             return value_max
         return value
+    
+    def _create_translation_target(self, x_meters: float, y_meters: float, intermediate_handoff_radius_meters: Optional[float] = None) -> TranslationTarget:
+        """Create a TranslationTarget with proper default handoff radius from config."""
+        if intermediate_handoff_radius_meters is None:
+            try:
+                default_val = self.project_manager.get_default_optional_value('intermediate_handoff_radius_meters') if self.project_manager else None
+                intermediate_handoff_radius_meters = default_val
+            except Exception:
+                intermediate_handoff_radius_meters = None
+        
+        return TranslationTarget(
+            x_meters=x_meters,
+            y_meters=y_meters,
+            intermediate_handoff_radius_meters=intermediate_handoff_radius_meters
+        )
+
+    def _create_waypoint(
+        self,
+        x_meters: float,
+        y_meters: float,
+        *,
+        intermediate_handoff_radius_meters: Optional[float] = None,
+        rotation_radians: float = 0.0,
+        t_ratio: float = 0.0,
+        profiled_rotation: bool = True,
+    ) -> Waypoint:
+        """Create a Waypoint ensuring the translation target's handoff radius
+        defaults from config when not provided.
+        """
+        tt = self._create_translation_target(
+            x_meters=x_meters,
+            y_meters=y_meters,
+            intermediate_handoff_radius_meters=intermediate_handoff_radius_meters,
+        )
+        rt = RotationTarget(
+            rotation_radians=rotation_radians,
+            t_ratio=t_ratio,
+            profiled_rotation=profiled_rotation,
+        )
+        return Waypoint(translation_target=tt, rotation_target=rt)
+
+    def _get_robot_dimensions(self) -> Tuple[float, float]:
+        """Return (length_m, width_m) for rectangle-based elements.
+        Prefer project config if available, otherwise fall back to canvas defaults.
+        """
+        length_m = float(ELEMENT_RECT_WIDTH_M)
+        width_m = float(ELEMENT_RECT_HEIGHT_M)
+        try:
+            if getattr(self, 'project_manager', None) is not None and getattr(self.project_manager, 'config', None):
+                cfg = self.project_manager.config
+                length_m = float(cfg.get('robot_length_meters', length_m))
+                width_m = float(cfg.get('robot_width_meters', width_m))
+        except Exception:
+            pass
+        return length_m, width_m
+
+    def _element_bounding_radius_for_type(self, elem_type: ElementType) -> float:
+        """Approximate half-diagonal radius for overlap checks based on element type."""
+        if elem_type == ElementType.TRANSLATION:
+            return float(ELEMENT_CIRCLE_RADIUS_M)
+        # Waypoint and Rotation use rectangle dimensions
+        length_m, width_m = self._get_robot_dimensions()
+        return float(math.hypot(length_m / 2.0, width_m / 2.0))
+
+    def _element_bounding_radius_for_instance(self, element: Any) -> float:
+        if isinstance(element, TranslationTarget):
+            return float(ELEMENT_CIRCLE_RADIUS_M)
+        if isinstance(element, Waypoint) or isinstance(element, RotationTarget):
+            length_m, width_m = self._get_robot_dimensions()
+            return float(math.hypot(length_m / 2.0, width_m / 2.0))
+        return 0.3
+
+    def _element_position_for_index(self, idx: int) -> Tuple[float, float]:
+        """Return model-space center position for element at idx."""
+        if self.path is None or idx < 0 or idx >= len(self.path.path_elements):
+            return 0.0, 0.0
+        e = self.path.path_elements[idx]
+        if isinstance(e, TranslationTarget):
+            return float(e.x_meters), float(e.y_meters)
+        if isinstance(e, Waypoint):
+            return float(e.translation_target.x_meters), float(e.translation_target.y_meters)
+        if isinstance(e, RotationTarget):
+            prev_pos, next_pos = self._neighbor_positions_model(idx)
+            if prev_pos is None or next_pos is None:
+                return 0.0, 0.0
+            ax, ay = prev_pos
+            bx, by = next_pos
+            try:
+                t = float(getattr(e, 't_ratio', 0.0))
+            except Exception:
+                t = 0.0
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            return ax + t * (bx - ax), ay + t * (by - ay)
+        return 0.0, 0.0
+
+    def _propose_non_overlapping_position(self, base_x: float, base_y: float, new_type: ElementType) -> Tuple[float, float]:
+        """Find a nearby position to base_x/base_y that avoids significant overlap with existing elements."""
+        if self.path is None or not getattr(self.path, 'path_elements', None):
+            # Clamp to field bounds and return
+            return (
+                Sidebar._clamp_from_metadata('x_meters', float(base_x)),
+                Sidebar._clamp_from_metadata('y_meters', float(base_y)),
+            )
+
+        # Build list of existing positions and their radii
+        existing: list[Tuple[float, float, float]] = []
+        try:
+            for i, el in enumerate(self.path.path_elements):
+                px, py = self._element_position_for_index(i)
+                r = self._element_bounding_radius_for_instance(el)
+                existing.append((float(px), float(py), float(r)))
+        except Exception:
+            pass
+
+        new_r = self._element_bounding_radius_for_type(new_type)
+        margin = 0.10  # small visual gap
+
+        def _is_clear(x: float, y: float) -> bool:
+            for (ox, oy, orad) in existing:
+                dx = x - ox
+                dy = y - oy
+                if dx * dx + dy * dy < (new_r + orad + margin) ** 2:
+                    return False
+            return True
+
+        # First try base
+        bx = Sidebar._clamp_from_metadata('x_meters', float(base_x))
+        by = Sidebar._clamp_from_metadata('y_meters', float(base_y))
+        if _is_clear(bx, by):
+            return bx, by
+
+        # Try offsets in expanding rings around base
+        length_m, width_m = self._get_robot_dimensions()
+        step = max(new_r * 2.0, max(length_m, width_m) * 0.6, float(ELEMENT_CIRCLE_RADIUS_M) * 2.0) + margin
+        directions = [
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+            (2, 0), (-2, 0), (0, 2), (0, -2),
+        ]
+        for ring in range(1, 4):
+            dist = step * ring
+            for dx_unit, dy_unit in directions:
+                x = Sidebar._clamp_from_metadata('x_meters', bx + dx_unit * dist)
+                y = Sidebar._clamp_from_metadata('y_meters', by + dy_unit * dist)
+                if _is_clear(x, y):
+                    return x, y
+
+        # Fallback: return base clamped
+        return bx, by
 
     def __init__(self, path=Path()):
 
@@ -638,9 +790,16 @@ class Sidebar(QWidget):
             if 'intermediate_handoff_radius_meters' in self.spinners:
                 control, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
                 val = getattr(element.translation_target, 'intermediate_handoff_radius_meters', None)
+                # Use default value from config if val is None
+                if val is None:
+                    try:
+                        default_val = self.project_manager.get_default_optional_value('intermediate_handoff_radius_meters') if self.project_manager else None
+                        val = default_val if default_val is not None else 0.0
+                    except Exception:
+                        val = 0.0
                 try:
                     control.blockSignals(True)
-                    control.setValue(float(val) if val is not None else 0.0)
+                    control.setValue(float(val))
                 finally:
                     control.blockSignals(False)
                 label.setVisible(True)
@@ -652,9 +811,16 @@ class Sidebar(QWidget):
             if 'intermediate_handoff_radius_meters' in self.spinners:
                 control, label, btn, spin_row = self.spinners['intermediate_handoff_radius_meters']
                 val = getattr(element, 'intermediate_handoff_radius_meters', None)
+                # Use default value from config if val is None
+                if val is None:
+                    try:
+                        default_val = self.project_manager.get_default_optional_value('intermediate_handoff_radius_meters') if self.project_manager else None
+                        val = default_val if default_val is not None else 0.0
+                    except Exception:
+                        val = 0.0
                 try:
                     control.blockSignals(True)
-                    control.setValue(float(val) if val is not None else 0.0)
+                    control.setValue(float(val))
                 finally:
                     control.blockSignals(False)
                 label.setVisible(True)
@@ -765,14 +931,34 @@ class Sidebar(QWidget):
             # profiled rotation
             set_control_value('profiled_rotation', getattr(element.rotation_target, 'profiled_rotation', True))
             # core handoff radius
-            if hasattr(element.translation_target, 'intermediate_handoff_radius_meters') and element.translation_target.intermediate_handoff_radius_meters is not None:
-                set_control_value('intermediate_handoff_radius_meters', float(element.translation_target.intermediate_handoff_radius_meters))
+            if hasattr(element.translation_target, 'intermediate_handoff_radius_meters'):
+                val = element.translation_target.intermediate_handoff_radius_meters
+                if val is not None:
+                    set_control_value('intermediate_handoff_radius_meters', float(val))
+                else:
+                    # Use default value from config if val is None
+                    try:
+                        default_val = self.project_manager.get_default_optional_value('intermediate_handoff_radius_meters') if self.project_manager else None
+                        display_val = default_val if default_val is not None else 0.0
+                        set_control_value('intermediate_handoff_radius_meters', float(display_val))
+                    except Exception:
+                        set_control_value('intermediate_handoff_radius_meters', 0.0)
         elif isinstance(element, TranslationTarget):
             set_control_value('x_meters', element.x_meters)
             set_control_value('y_meters', element.y_meters)
             # core handoff radius
-            if hasattr(element, 'intermediate_handoff_radius_meters') and element.intermediate_handoff_radius_meters is not None:
-                set_control_value('intermediate_handoff_radius_meters', float(element.intermediate_handoff_radius_meters))
+            if hasattr(element, 'intermediate_handoff_radius_meters'):
+                val = element.intermediate_handoff_radius_meters
+                if val is not None:
+                    set_control_value('intermediate_handoff_radius_meters', float(val))
+                else:
+                    # Use default value from config if val is None
+                    try:
+                        default_val = self.project_manager.get_default_optional_value('intermediate_handoff_radius_meters') if self.project_manager else None
+                        display_val = default_val if default_val is not None else 0.0
+                        set_control_value('intermediate_handoff_radius_meters', float(display_val))
+                    except Exception:
+                        set_control_value('intermediate_handoff_radius_meters', 0.0)
         elif isinstance(element, RotationTarget):
             if element.rotation_radians is not None:
                 set_control_value('rotation_degrees', math.degrees(element.rotation_radians))
@@ -1048,14 +1234,20 @@ class Sidebar(QWidget):
                 else:
                     x_new = float(translation_values['x_meters'] or 0.0)
                     y_new = float(translation_values['y_meters'] or 0.0)
-                new_elem = TranslationTarget(
+                new_elem = self._create_translation_target(
                     x_new,
                     y_new,
                     translation_values['intermediate_handoff_radius_meters']
                 )
             elif new_type == ElementType.WAYPOINT:
                 if prev_type == ElementType.TRANSLATION:
-                    new_elem = Waypoint(translation_target=prev)
+                    # Recreate translation target to ensure handoff radius default is applied
+                    tt = self._create_translation_target(
+                        float(getattr(prev, 'x_meters', 0.0)),
+                        float(getattr(prev, 'y_meters', 0.0)),
+                        getattr(prev, 'intermediate_handoff_radius_meters', None),
+                    )
+                    new_elem = Waypoint(translation_target=tt)
                     # keep rotation ratio default at 0.0
                 else:
                     # prev is RotationTarget; create a waypoint at the rotation's implied position
@@ -1072,7 +1264,7 @@ class Sidebar(QWidget):
                         y_new = ay + t * (by - ay)
                     else:
                         x_new, y_new = 0.0, 0.0
-                    tt = TranslationTarget(x_meters=x_new, y_meters=y_new)
+                    tt = self._create_translation_target(x_meters=x_new, y_meters=y_new)
                     new_elem = Waypoint(rotation_target=prev, translation_target=tt)
 
             # If we have just created or switched to a rotation element, snap its x/y to closest point on line between neighbors
@@ -1444,27 +1636,171 @@ class Sidebar(QWidget):
                 return (ax + bx) / 2.0, (ay + by) / 2.0
             return float(FIELD_LENGTH_METERS / 2.0), float(FIELD_WIDTH_METERS / 2.0)
         x0, y0 = current_pos_defaults()
+        # Propose a nearby non-overlapping position relative to current element
+        try:
+            x0, y0 = self._propose_non_overlapping_position(x0, y0, new_type)
+        except Exception:
+            pass
         # Announce about-to-change for undo snapshot
         try:
             self.aboutToChange.emit(f"Add {new_type.value}")
         except Exception:
             pass
         if new_type == ElementType.TRANSLATION:
-            new_elem = TranslationTarget(x_meters=x0, y_meters=y0)
+            new_elem = self._create_translation_target(x_meters=x0, y_meters=y0)
         elif new_type == ElementType.WAYPOINT:
-            tt = TranslationTarget(x_meters=x0, y_meters=y0)
-            # Start waypoint's rotation at same position (ratio 0.0 by default)
-            rt = RotationTarget(rotation_radians=0.0, t_ratio=0.0, profiled_rotation=True)
-            new_elem = Waypoint(translation_target=tt, rotation_target=rt)
+            # Use helper to ensure handoff radius defaulting from config
+            new_elem = self._create_waypoint(
+                x_meters=x0,
+                y_meters=y0,
+                intermediate_handoff_radius_meters=None,
+                rotation_radians=0.0,
+                t_ratio=0.0,
+                profiled_rotation=True,
+            )
         else:  # ROTATION
-            # Create rotation with default ratio; will be adjusted to midpoint below
-            new_elem = RotationTarget(rotation_radians=0.0, t_ratio=0.5, profiled_rotation=True)
+            # Choose a t_ratio along the segment between nearest anchors to avoid overlap
+            # Determine anchor positions relative to the insertion point
+            prev_pos = None
+            next_pos = None
+            try:
+                # Scan backward from insert_pos-1 for previous anchor
+                for i in range(insert_pos - 1, -1, -1):
+                    el = self.path.path_elements[i]
+                    if isinstance(el, TranslationTarget):
+                        prev_pos = (float(el.x_meters), float(el.y_meters))
+                        break
+                    if isinstance(el, Waypoint):
+                        prev_pos = (float(el.translation_target.x_meters), float(el.translation_target.y_meters))
+                        break
+                # Scan forward from insert_pos for next anchor
+                for i in range(insert_pos, len(self.path.path_elements)):
+                    el = self.path.path_elements[i]
+                    if isinstance(el, TranslationTarget):
+                        next_pos = (float(el.x_meters), float(el.y_meters))
+                        break
+                    if isinstance(el, Waypoint):
+                        next_pos = (float(el.translation_target.x_meters), float(el.translation_target.y_meters))
+                        break
+            except Exception:
+                prev_pos, next_pos = None, None
+
+            # Base t from projecting the current default position onto the segment
+            def _project_t(ax: float, ay: float, bx: float, by: float, x: float, y: float) -> float:
+                dx = bx - ax
+                dy = by - ay
+                denom = dx * dx + dy * dy
+                if denom <= 0.0:
+                    return 0.5
+                t = ((x - ax) * dx + (y - ay) * dy) / denom
+                if t < 0.0:
+                    t = 0.0
+                elif t > 1.0:
+                    t = 1.0
+                return float(t)
+
+            # Build existing elements footprint list for overlap checks
+            existing = []
+            try:
+                for i, el in enumerate(self.path.path_elements):
+                    px, py = self._element_position_for_index(i)
+                    r = self._element_bounding_radius_for_instance(el)
+                    existing.append((float(px), float(py), float(r)))
+            except Exception:
+                pass
+
+            # Candidate t search around t_base
+            def _pos_for_t(ax: float, ay: float, bx: float, by: float, t: float) -> Tuple[float, float]:
+                return ax + t * (bx - ax), ay + t * (by - ay)
+
+            def _is_clear(x: float, y: float, new_r: float) -> bool:
+                for (ox, oy, orad) in existing:
+                    dx = x - ox
+                    dy = y - oy
+                    if dx * dx + dy * dy < (new_r + orad + 0.10) ** 2:
+                        return False
+                return True
+
+            # Compute new element radius for overlap checks (rotation footprint ~= waypoint rect)
+            new_r = self._element_bounding_radius_for_type(ElementType.ROTATION)
+            # Default to midpoint
+            t_choice = 0.5
+            if prev_pos is not None and next_pos is not None:
+                ax, ay = prev_pos
+                bx, by = next_pos
+                # Compute end exclusion based on element footprints
+                try:
+                    # Find the actual anchor elements to get radii
+                    prev_el = None
+                    next_el = None
+                    for i in range(insert_pos - 1, -1, -1):
+                        el = self.path.path_elements[i]
+                        if isinstance(el, (TranslationTarget, Waypoint)):
+                            prev_el = el
+                            break
+                    for i in range(insert_pos, len(self.path.path_elements)):
+                        el = self.path.path_elements[i]
+                        if isinstance(el, (TranslationTarget, Waypoint)):
+                            next_el = el
+                            break
+                    prev_rad = self._element_bounding_radius_for_instance(prev_el) if prev_el is not None else 0.0
+                    next_rad = self._element_bounding_radius_for_instance(next_el) if next_el is not None else 0.0
+                except Exception:
+                    prev_rad = 0.0
+                    next_rad = 0.0
+
+                seg_len = math.hypot(bx - ax, by - ay)
+                margin = 0.10
+                if seg_len > 0.0:
+                    t_min = min(0.45, (new_r + prev_rad + margin) / seg_len)
+                    t_max = 1.0 - min(0.45, (new_r + next_rad + margin) / seg_len)
+                    if t_min > t_max:
+                        # Degenerate case: fall back to center band
+                        t_min, t_max = 0.25, 0.75
+                else:
+                    t_min, t_max = 0.05, 0.95
+
+                # Start from selection-aware base:
+                t_base = 0.5
+                try:
+                    sel_idx = self.get_selected_index()
+                    if sel_idx is not None:
+                        sel_el = self.path.get_element(sel_idx)
+                        if isinstance(sel_el, RotationTarget):
+                            t_base = float(getattr(sel_el, 't_ratio', 0.5))
+                        else:
+                            t_base = _project_t(ax, ay, bx, by, x0, y0)
+                    else:
+                        t_base = _project_t(ax, ay, bx, by, x0, y0)
+                except Exception:
+                    t_base = _project_t(ax, ay, bx, by, x0, y0)
+
+                # Constrain to allowed interior range
+                t_base = max(min(t_base, t_max), t_min)
+                # Try a set of offsets around t_base
+                delta = 0.08
+                try:
+                    if seg_len > 0:
+                        delta = min(0.20, max(0.04, (new_r + margin) / seg_len * 2.0))
+                except Exception:
+                    pass
+                offsets = [0.0, delta, -delta, 2 * delta, -2 * delta, 3 * delta, -3 * delta]
+                for off in offsets:
+                    t_try = max(min(t_base + off, t_max), t_min)
+                    cx, cy = _pos_for_t(ax, ay, bx, by, t_try)
+                    if _is_clear(cx, cy, new_r):
+                        t_choice = t_try
+                        break
+            # Create rotation with chosen ratio
+            new_elem = RotationTarget(rotation_radians=0.0, t_ratio=float(t_choice), profiled_rotation=True)
         # Insert and then fix constraints/positions
         self.path.path_elements.insert(insert_pos, new_elem)
-        # If we inserted a rotation, snap it to midpoint between neighbors
+        # If we inserted a rotation, ensure its t_ratio stays as chosen above
         if isinstance(new_elem, RotationTarget):
-            # Set initial ratio to midpoint
-            new_elem.t_ratio = 0.5
+            try:
+                new_elem.t_ratio = float(getattr(new_elem, 't_ratio', 0.5))
+            except Exception:
+                new_elem.t_ratio = 0.5
         # After any insert, ensure rotations are not at ends; if they are, swap inward with nearest non-rotation
         self._repair_rotation_at_ends()
         # Reproject rotation positions
@@ -1523,13 +1859,15 @@ class Sidebar(QWidget):
                 if swap_idx is not None:
                     elems[0], elems[swap_idx] = elems[swap_idx], elems[0]
             else:
-                # Convert start to TranslationTarget
+                # Convert start to Waypoint (preserve rotation, add translation at safe pos)
                 old = elems[0]
-                # RotationTarget doesn't have position, so find a nearby position or use default
                 x_pos, y_pos = self._get_safe_position_for_rotation(old, elems, 0)
-                elems[0] = TranslationTarget(
-                    x_meters=x_pos,
-                    y_meters=y_pos
+                elems[0] = self._create_waypoint(
+                    x_meters=float(x_pos),
+                    y_meters=float(y_pos),
+                    rotation_radians=float(getattr(old, 'rotation_radians', 0.0)),
+                    t_ratio=float(getattr(old, 't_ratio', 0.0)),
+                    profiled_rotation=bool(getattr(old, 'profiled_rotation', True)),
                 )
         # Repair end
         if elems and isinstance(elems[-1], RotationTarget):
@@ -1540,13 +1878,15 @@ class Sidebar(QWidget):
                 if swap_idx is not None:
                     elems[-1], elems[swap_idx] = elems[swap_idx], elems[-1]
             else:
-                # Convert end to TranslationTarget
+                # Convert end to Waypoint (preserve rotation, add translation at safe pos)
                 old = elems[-1]
-                # RotationTarget doesn't have position, so find a nearby position or use default
                 x_pos, y_pos = self._get_safe_position_for_rotation(old, elems, len(elems) - 1)
-                elems[-1] = TranslationTarget(
-                    x_meters=x_pos,
-                    y_meters=y_pos
+                elems[-1] = self._create_waypoint(
+                    x_meters=float(x_pos),
+                    y_meters=float(y_pos),
+                    rotation_radians=float(getattr(old, 'rotation_radians', 0.0)),
+                    t_ratio=float(getattr(old, 't_ratio', 0.0)),
+                    profiled_rotation=bool(getattr(old, 'profiled_rotation', True)),
                 )
 
     def _get_safe_position_for_rotation(self, rotation_target, elems, index):
