@@ -309,15 +309,12 @@ def _desired_heading_for_global_s(
         s0, th0, profiled0 = frames[i]
         s1, th1, profiled1 = frames[i + 1]
         if s_m <= s0 + 1e-12:
-            # If we're exactly at this keyframe, hold its heading.
+            # Exactly at this keyframe: hold its heading; do not pre-snap ahead
             if abs(s_m - s0) <= 1e-12:
                 delta = shortest_angular_distance(th1, th0)
                 dtheta_ds = (delta / max((s1 - s0), 1e-9))
                 return th0, dtheta_ds, profiled1
-            # Only snap ahead to the next (non-profiled) keyframe if we're strictly
-            # before the current keyframe. This avoids snapping at s == s0.
-            if s_m < s0 - 1e-12 and not profiled1:
-                return th1, 0.0, profiled1
+            # Before the keyframe: continue holding current heading; no pre-snap
             delta = shortest_angular_distance(th1, th0)
             dtheta_ds = (delta / max((s1 - s0), 1e-9))
             return th0, dtheta_ds, profiled1
@@ -357,27 +354,23 @@ def _desired_heading_for_progress(
         t0, th0, profiled0 = frames[i]
         t1, th1, profiled1 = frames[i + 1]
         if t <= t0 + 1e-12:
-            # If we're exactly at this keyframe, hold its heading.
+            # Exactly at this keyframe: hold its heading; do not pre-snap ahead
             if abs(t - t0) <= 1e-12:
                 delta = shortest_angular_distance(th1, th0)
                 dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
-                return th0, dtheta_ds, profiled1  # Interpolate away from th0
-            # Only snap ahead if we're strictly before the current keyframe and the
-            # upcoming keyframe is non-profiled.
-            if t < t0 - 1e-12 and not profiled1:
-                return th1, 0.0, profiled1
+                return th0, dtheta_ds, profiled1
+            # Before this keyframe: hold current heading; do not pre-snap
             delta = shortest_angular_distance(th1, th0)
             dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
-            return th0, dtheta_ds, profiled1  # Profiled: interpolate from th0
+            return th0, dtheta_ds, profiled1
         if t0 < t <= t1 + 1e-12:
-            # If this segment of heading is non-profiled, target the end keyframe directly
             if not profiled1:
                 return th1, 0.0, profiled1
             alpha = (t - t0) / max((t1 - t0), 1e-9)
             delta = shortest_angular_distance(th1, th0)
             desired_theta = wrap_angle_radians(th0 + delta * alpha)
             dtheta_ds = (delta / max((t1 - t0) * max(seg.length_m, 1e-9), 1e-9))
-            return desired_theta, dtheta_ds, profiled1  # Profiled: interpolate toward th1
+            return desired_theta, dtheta_ds, profiled1
 
     t_last, th_last, profiled_last = frames[-1]
     # If the final keyframe is non-profiled, just hold that target
@@ -646,19 +639,10 @@ def simulate_path(
         vy_des = v_des_scalar * uy
 
         # ROTATION CONTROL: decoupled from translation
-        if profiled_rotation:
-            # Profiled rotation: follow the interpolated desired heading, shaped by trapezoidal profile
-            rotation_target_theta = desired_theta
-        else:
-            # Non-profiled rotation: target the end heading of the current interval (next keyframe's theta)
-            next_theta = None
-            for kf in global_keyframes:
-                if kf.s_m > global_s + 1e-12:
-                    next_theta = kf.theta_target
-                    break
-            if next_theta is None:
-                next_theta = end_heading_target
-            rotation_target_theta = next_theta
+        # For both profiled and non-profiled intervals, use desired_theta returned by
+        # _desired_heading_for_global_s. That function interpolates for profiled and
+        # snaps to the end target for non-profiled inside the interval, and holds before it.
+        rotation_target_theta = desired_theta
 
         omega_des = _trapezoidal_rotation_profile(
             current_theta=theta,
