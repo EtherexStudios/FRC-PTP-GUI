@@ -519,19 +519,11 @@ def simulate_path(
     # DEBUG: Print angular constraints
     print(f"DEBUG: Angular constraints - max_omega={math.degrees(max_omega):.1f}°/s, max_alpha={math.degrees(max_alpha):.1f}°/s²")
 
-    # End tolerances
-    end_translation_tolerance_m = _resolve_constraint(
-        getattr(c, "end_translation_tolerance_meters", None),
-        cfg.get("end_translation_tolerance_meters"),
-        0.03,
-    )
-    end_rotation_tolerance_rad = math.radians(
-        _resolve_constraint(
-            getattr(c, "end_rotation_tolerance_deg", None),
-            cfg.get("end_rotation_tolerance_deg"),
-            2.0,
-        )
-    )
+    # Ideal end tolerances (zero). Use small epsilons internally for numerical robustness.
+    end_translation_tolerance_m = 0.0
+    end_rotation_tolerance_rad = 0.0
+    _EPS_POS = 1e-6
+    _EPS_ANG = 1e-6
 
     # Default handoff radius from config
     default_handoff_radius = _resolve_constraint(None, cfg.get("intermediate_handoff_radius_meters"), 0.05)
@@ -636,19 +628,9 @@ def simulate_path(
 
         remaining = remaining_distance_from(seg_idx, x, y, projected_s)
 
-        abs_dtheta_ds = abs(dtheta_ds)
-        if profiled_rotation:
-            # Profiled: translation speed limited by heading change rate
-            if abs_dtheta_ds > 1e-9:
-                max_v_dyn = max_omega / abs_dtheta_ds
-                max_a_dyn = max_alpha / abs_dtheta_ds
-            else:
-                max_v_dyn = max_v + 100.0
-                max_a_dyn = max_a + 100.0
-        else:
-            # Non-profiled rotation should not bottleneck translation speed
-            max_v_dyn = max_v
-            max_a_dyn = max_a
+        # Decouple translation from rotation entirely
+        max_v_dyn = max_v
+        max_a_dyn = max_a
 
         max_a_mag = min(max_a, max_a_dyn)
 
@@ -663,48 +645,38 @@ def simulate_path(
         vx_des = v_des_scalar * ux
         vy_des = v_des_scalar * uy
 
-        # ROTATION CONTROL: Choose between profiled and trapezoidal motion
+        # ROTATION CONTROL: decoupled from translation
         if profiled_rotation:
-            # PROFILED ROTATION: Direct angular error calculation for smooth motion
-            angular_error = shortest_angular_distance(desired_theta, theta)
-            
-            # Calculate the required angular velocity to reach target in one timestep
-            required_omega = angular_error / dt_s
-            
-            # Limit to maximum angular velocity
-            if abs(required_omega) > max_omega:
-                omega_des = math.copysign(max_omega, required_omega)
-            else:
-                omega_des = required_omega
-                
-            # Apply normal acceleration limiting for profiled rotation
-            limited = limit_acceleration(
-                desired=ChassisSpeeds(vx_des, vy_des, omega_des),
-                last=speeds,
-                dt=dt_s,
-                max_trans_accel_mps2=max_a,
-                max_angular_accel_radps2=max_alpha,
-            )
+            # Profiled rotation: follow the interpolated desired heading, shaped by trapezoidal profile
+            rotation_target_theta = desired_theta
         else:
-            # NON-PROFILED ROTATION: Use trapezoidal motion profile for fast rotation
-            omega_des = _trapezoidal_rotation_profile(
-                current_theta=theta,
-                target_theta=desired_theta,
-                current_omega=speeds.omega_radps,
-                max_omega=max_omega,
-                max_alpha=max_alpha,
-                dt=dt_s
-            )
-            
-            # For non-profiled rotation, use normal acceleration limiting
-            # The trapezoidal profile now handles smooth acceleration internally
-            limited = limit_acceleration(
-                desired=ChassisSpeeds(vx_des, vy_des, omega_des),
-                last=speeds,
-                dt=dt_s,
-                max_trans_accel_mps2=max_a,
-                max_angular_accel_radps2=max_alpha,  # Use normal angular acceleration limits
-            )
+            # Non-profiled rotation: target the end heading of the current interval (next keyframe's theta)
+            next_theta = None
+            for kf in global_keyframes:
+                if kf.s_m > global_s + 1e-12:
+                    next_theta = kf.theta_target
+                    break
+            if next_theta is None:
+                next_theta = end_heading_target
+            rotation_target_theta = next_theta
+
+        omega_des = _trapezoidal_rotation_profile(
+            current_theta=theta,
+            target_theta=rotation_target_theta,
+            current_omega=speeds.omega_radps,
+            max_omega=max_omega,
+            max_alpha=max_alpha,
+            dt=dt_s,
+        )
+
+        # Apply acceleration limiting
+        limited = limit_acceleration(
+            desired=ChassisSpeeds(vx_des, vy_des, omega_des),
+            last=speeds,
+            dt=dt_s,
+            max_trans_accel_mps2=max_a,
+            max_angular_accel_radps2=max_alpha,
+        )
 
         v_mag = hypot2(limited.vx_mps, limited.vy_mps)
         if v_mag > max_v > 0.0:
@@ -713,8 +685,19 @@ def simulate_path(
         if abs(limited.omega_radps) > max_omega > 0.0:
             limited = ChassisSpeeds(limited.vx_mps, limited.vy_mps, math.copysign(max_omega, limited.omega_radps))
 
-        x += limited.vx_mps * dt_s
-        y += limited.vy_mps * dt_s
+        # Advance translation; clamp to final point on last segment to avoid overshoot with zero tolerances
+        step_dx = limited.vx_mps * dt_s
+        step_dy = limited.vy_mps * dt_s
+        if seg_idx == len(segments) - 1:
+            if hypot2(step_dx, step_dy) >= max(0.0, dist_to_target - _EPS_POS):
+                x = end_x
+                y = end_y
+            else:
+                x += step_dx
+                y += step_dy
+        else:
+            x += step_dx
+            y += step_dy
         theta = wrap_angle_radians(theta + limited.omega_radps * dt_s)
 
         t_key = round(t_s, 3)
@@ -724,14 +707,30 @@ def simulate_path(
         # Add current position to trail
         trail_points.append((float(x), float(y)))
 
-        # Check end-of-path conditions: within end translation tolerance AND end rotation tolerance
+        # Check end-of-path conditions with ideal (zero) tolerances and internal eps snapping
         dx_end = end_x - x
         dy_end = end_y - y
         dist_to_final = hypot2(dx_end, dy_end)
-        if dist_to_final <= end_translation_tolerance_m:
-            rot_err = abs(shortest_angular_distance(end_heading_target, theta))
-            if rot_err <= end_rotation_tolerance_rad:
-                break
+        rot_err = abs(shortest_angular_distance(end_heading_target, theta))
+
+        snapped = False
+        if dist_to_final <= _EPS_POS:
+            x = end_x
+            y = end_y
+            dist_to_final = 0.0
+            snapped = True
+        if rot_err <= _EPS_ANG:
+            theta = end_heading_target
+            rot_err = 0.0
+            snapped = True
+
+        if snapped:
+            poses_by_time[t_key] = (float(x), float(y), float(theta))
+            trail_points[-1] = (float(x), float(y))
+
+        if dist_to_final <= end_translation_tolerance_m and rot_err <= end_rotation_tolerance_rad:
+            speeds = ChassisSpeeds(0.0, 0.0, 0.0)
+            break
 
         t_s += dt_s
         speeds = limited
