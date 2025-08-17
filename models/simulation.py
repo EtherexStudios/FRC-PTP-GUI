@@ -501,7 +501,6 @@ def simulate_path(
         return SimResult(poses_by_time=poses_by_time, times_sorted=times_sorted, total_time_s=0.0, trail_points=trail_points)
 
     c = getattr(path, "constraints", None)
-    initial_v = _resolve_constraint(getattr(c, "initial_velocity_meters_per_sec", None), cfg.get("initial_velocity_meters_per_sec"), 0.0)
     final_v = _resolve_constraint(getattr(c, "final_velocity_meters_per_sec", None), cfg.get("final_velocity_meters_per_sec"), 0.0)
     max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("max_velocity_meters_per_sec"), 3.0)
     max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("max_acceleration_meters_per_sec2"), 2.5)
@@ -541,12 +540,7 @@ def simulate_path(
     y = first_seg.ay
     theta = initial_heading
 
-    dx = first_seg.bx - x
-    dy = first_seg.by - y
-    dist = hypot2(dx, dy)
-    ux = dx / dist if dist > 1e-9 else 1.0
-    uy = dy / dist if dist > 1e-9 else 0.0
-    speeds = ChassisSpeeds(vx_mps=ux * initial_v, vy_mps=uy * initial_v, omega_radps=0.0)
+    speeds = ChassisSpeeds(vx_mps=0.0, vy_mps=0.0, omega_radps=0.0)
 
     t_s = 0.0
     seg_idx = 0

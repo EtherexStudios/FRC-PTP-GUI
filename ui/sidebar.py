@@ -162,7 +162,6 @@ class Sidebar(QWidget):
         # Boolean checkbox for profiled rotation
         'profiled_rotation': {'label': 'Profiled Rotation', 'type': 'checkbox', 'removable': False, 'section': 'core'},
         # Constraints (optional)
-        'initial_velocity_meters_per_sec': {'label': 'Initial Velocity (m/s)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
         'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
         'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
         'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
@@ -849,7 +848,7 @@ class Sidebar(QWidget):
         if self.path is not None and hasattr(self.path, 'constraints') and self.path.constraints is not None:
             c = self.path.constraints
             # Translation constraints
-            for name in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
+            for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
                 if hasattr(c, name):
                     val = getattr(c, name)
                     if val is not None and name in self.spinners:
@@ -1068,7 +1067,7 @@ class Sidebar(QWidget):
         element = self.path.get_element(idx)
         # Build description
         label_text = Sidebar._label(key).replace('<br/>', ' ')
-        desc = f"Remove {label_text}" if key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'] else f"Remove {label_text}"
+        desc = f"Remove {label_text}" if key in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'] else f"Remove {label_text}"
         try:
             self.aboutToChange.emit(desc)
         except Exception:
@@ -1081,7 +1080,7 @@ class Sidebar(QWidget):
                     setattr(element.rotation_target, mapped, None)
             elif hasattr(element, mapped):
                 setattr(element, mapped, None)
-        elif key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+        elif key in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
             # Removing a path-level constraint
             if hasattr(self.path, 'constraints'):
                 setattr(self.path.constraints, key, None)
@@ -1127,7 +1126,7 @@ class Sidebar(QWidget):
             pass
 
         # Path-level constraints or element attributes
-        if real_key in ['initial_velocity_meters_per_sec', 'final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
+        if real_key in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
             base_val = float(cfg_default) if cfg_default is not None else 0.0
             if hasattr(self.path, 'constraints'):
                 setattr(self.path.constraints, real_key, base_val)
@@ -1381,7 +1380,6 @@ class Sidebar(QWidget):
             desc: str = f"Edit {label_text}"
             # Path constraints group
             path_constraint_keys = [
-                'initial_velocity_meters_per_sec',
                 'final_velocity_meters_per_sec',
                 'max_velocity_meters_per_sec',
                 'max_acceleration_meters_per_sec2',

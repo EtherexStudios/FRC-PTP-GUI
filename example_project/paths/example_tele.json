@@ -1,7 +1,4 @@
 {
-  "constraints": {
-    "initial_velocity_meters_per_sec": 0.5
-  },
   "path_elements": [
     {
       "type": "translation",

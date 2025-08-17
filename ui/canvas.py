@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import os
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
@@ -21,7 +22,7 @@ FIELD_WIDTH_METERS = 8.21
 # Defaults; can be overridden at runtime from config
 ELEMENT_RECT_WIDTH_M = 0.60
 ELEMENT_RECT_HEIGHT_M = 0.60
-ELEMENT_CIRCLE_RADIUS_M = 0.20  # radius for circle elements
+ELEMENT_CIRCLE_RADIUS_M = 0.005  # radius for circle elements
 TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
 OUTLINE_THIN_M = 0.06     # thin outline (e.g., rotation dashed)
 OUTLINE_THICK_M = 0.06    # thicker outline (e.g., translation aesthetic)
@@ -619,7 +620,21 @@ class CanvasView(QGraphicsView):
         self._field_pixmap_item.setZValue(-10)
         # Scale pixmap from pixels into meters preserving aspect ratio
         if pixmap.width() > 0 and pixmap.height() > 0:
-            s = min(FIELD_LENGTH_METERS / float(pixmap.width()), FIELD_WIDTH_METERS / float(pixmap.height()))
+            # If this is the 2025 field image, use a fixed pixels-per-meter scale
+            # of 200.0 px/m so 1 meter in the scene equals 200 pixels in the image.
+            s = None
+            try:
+                if os.path.basename(image_path) == "field25.png":
+                    ppm = 200.0  # pixels per meter
+                    s = 1.0 / float(ppm)  # meters per pixel
+            except Exception:
+                s = None
+            if s is None:
+                # Fallback: scale to fit the field dimensions
+                s = min(
+                    FIELD_LENGTH_METERS / float(pixmap.width()),
+                    FIELD_WIDTH_METERS / float(pixmap.height())
+                )
             self._field_pixmap_item.setTransform(QTransform().scale(s, s))
             # Position so bottom-left aligns with (0,0) model → account for scene y-down
             h_scaled = pixmap.height() * s

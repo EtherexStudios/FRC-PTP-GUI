@@ -335,7 +335,6 @@ class ProjectManager:
             c = path.constraints
             # translation constraints
             for name in [
-                "initial_velocity_meters_per_sec",
                 "final_velocity_meters_per_sec",
                 "max_velocity_meters_per_sec",
                 "max_acceleration_meters_per_sec2",
@@ -372,7 +371,6 @@ class ProjectManager:
             constraints_block = data.get("constraints", {}) or {}
             if isinstance(constraints_block, dict) and hasattr(path, 'constraints') and path.constraints is not None:
                 for name in [
-                    "initial_velocity_meters_per_sec",
                     "final_velocity_meters_per_sec",
                     "max_velocity_meters_per_sec",
                     "max_acceleration_meters_per_sec2",
