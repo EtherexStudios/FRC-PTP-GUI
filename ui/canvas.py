@@ -168,15 +168,22 @@ class RectElementItem(QGraphicsRectItem):
         # Local rect centered at origin so rotation occurs around center
         rw = getattr(self.canvas_view, "robot_length_m", ELEMENT_RECT_WIDTH_M)
         rh = getattr(self.canvas_view, "robot_width_m", ELEMENT_RECT_HEIGHT_M)
-        self.setRect(QRectF(-rw / 2.0, -rh / 2.0, rw, rh))
-        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
         # Pen/brush
         # Use thicker border for solid-outlined elements and thinner for dashed
-        thickness = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
+        pen_width_m = OUTLINE_THICK_M if (outline_color is not None and not dashed_outline) else OUTLINE_THIN_M
+        # Adjust rect so the OUTER visual edge corresponds exactly to rw x rh in meters.
+        # Qt strokes are centered on the path; shrinking the rect by the pen width keeps outer size accurate.
+        inset = (pen_width_m if outline_color is not None else 0.0) * 0.5
+        self.setRect(QRectF(-(rw / 2.0) + inset, -(rh / 2.0) + inset, rw - (inset * 2.0), rh - (inset * 2.0)))
+        self.setPos(self.canvas_view._scene_from_model(center_m.x(), center_m.y()))
         pen = QPen(outline_color if outline_color is not None else QColor("#000000"),
-                   thickness if outline_color is not None else 0.0)
+                   pen_width_m if outline_color is not None else 0.0)
         if dashed_outline:
             pen.setStyle(Qt.DashLine)
+        # Ensure sharp 90-degree corners and predictable pixel-to-pixel rendering
+        pen.setJoinStyle(Qt.MiterJoin)
+        pen.setCapStyle(Qt.SquareCap)
+        pen.setCosmetic(False)
         self.setPen(pen)
         
         # For waypoints, don't fill - just show borders
@@ -218,7 +225,11 @@ class RectElementItem(QGraphicsRectItem):
         if isinstance(self.canvas_view._path.path_elements[self.index_in_model], Waypoint):
             self.triangle_item.setBrush(Qt.NoBrush)
             # Use the passed color for the outline with thicker line to match box outline
-            self.triangle_item.setPen(QPen(color, OUTLINE_THICK_M))
+            p = QPen(color, OUTLINE_THICK_M)
+            p.setJoinStyle(Qt.MiterJoin)
+            p.setCapStyle(Qt.SquareCap)
+            p.setCosmetic(False)
+            self.triangle_item.setPen(p)
         else:
             self.triangle_item.setBrush(QBrush(color))
             self.triangle_item.setPen(OUTLINE_EDGE_PEN)
@@ -274,6 +285,15 @@ class RectElementItem(QGraphicsRectItem):
         except (AttributeError, TypeError):
             pass
         super().mouseReleaseEvent(event)
+
+    def paint(self, painter, option, widget=None):
+        # Disable antialiasing during rectangle paint to keep edges sharp and aligned to pixels
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setRenderHint(QPainter.HighQualityAntialiasing, False)
+        except Exception:
+            pass
+        super().paint(painter, option, widget)
 
 
 class RobotSimItem(QGraphicsRectItem):
@@ -525,7 +545,7 @@ class CanvasView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         # Ensure the view can receive keyboard focus for shortcuts
         self.setFocusPolicy(Qt.StrongFocus)
         self._is_fitting = False
@@ -534,6 +554,15 @@ class CanvasView(QGraphicsView):
         # Cache of rotation t parameters during an anchor drag (index -> t in [0,1])
         self._rotation_t_cache: Optional[dict[int, float]] = None
         self._anchor_drag_in_progress: bool = False
+
+        # Zoom state
+        self._zoom_factor: float = 1.0
+        self._min_zoom: float = 1.0
+        self._max_zoom: float = 8.0
+
+        # Pan state (right-click drag)
+        self._is_panning: bool = False
+        self._pan_start: Optional[QPoint] = None
 
         # Robot element rectangle dimensions (configurable at runtime)
         self.robot_length_m: float = ELEMENT_RECT_WIDTH_M
@@ -610,6 +639,27 @@ class CanvasView(QGraphicsView):
                 item.set_dimensions(self.robot_length_m, self.robot_width_m)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _update_sim_robot_visibility(self):
+        """Show robot overlay when playing or when paused at t>0; hide when paused at t==0 or no data."""
+        try:
+            if self._sim_robot_item is None:
+                return
+            # No simulation data -> hide
+            if not self._sim_times_sorted:
+                self._sim_robot_item.setVisible(False)
+                return
+            # Playing -> show
+            if self._sim_timer.isActive():
+                self._sim_robot_item.setVisible(True)
+                return
+            # Paused: show only if not at start
+            if self._sim_current_time_s <= 1e-6:
+                self._sim_robot_item.setVisible(False)
+            else:
+                self._sim_robot_item.setVisible(True)
         except Exception:
             pass
 
@@ -1154,6 +1204,9 @@ class CanvasView(QGraphicsView):
                     # Guard against rare crashes during rapid resizes/fullscreen toggles
                     try:
                         self.fitInView(rect, Qt.KeepAspectRatio)
+                        # Re-apply any user zoom so it persists across resizes
+                        if abs(self._zoom_factor - 1.0) > 1e-6:
+                            self.scale(self._zoom_factor, self._zoom_factor)
                     except RuntimeError:
                         # Underlying view/scene not ready
                         pass
@@ -1683,9 +1736,8 @@ class CanvasView(QGraphicsView):
                     t0 = self._sim_times_sorted[0]
                     x, y, th = self._sim_poses_by_time.get(t0, (0.0, 0.0, 0.0))
                     self._set_sim_robot_pose(x, y, th)
-                    self._sim_robot_item.setVisible(True)
-                else:
-                    self._sim_robot_item.setVisible(False)
+                # Update overlay visibility based on paused/zero rule
+                self._update_sim_robot_visibility()
             
             # Set up trail from simulation result
             if hasattr(result, 'trail_points') and result.trail_points:
@@ -1710,6 +1762,8 @@ class CanvasView(QGraphicsView):
                 self._sim_timer.stop()
                 if self._transport_btn is not None:
                     self._transport_btn.setText("▶")
+                # Update visibility when pausing
+                self._update_sim_robot_visibility()
             else:
                 # Do not start if no sim data
                 if not self._sim_times_sorted:
@@ -1730,6 +1784,8 @@ class CanvasView(QGraphicsView):
                 self._sim_timer.start()
                 if self._transport_btn is not None:
                     self._transport_btn.setText("⏸")
+                # Ensure visible when starting
+                self._update_sim_robot_visibility()
         except Exception:
             pass
 
@@ -1738,6 +1794,8 @@ class CanvasView(QGraphicsView):
             # Update current time; if playing, it will be used on next tick
             self._sim_current_time_s = float(value) / 1000.0
             self._seek_to_time(self._sim_current_time_s)
+            # Update visibility when seeking via slider
+            self._update_sim_robot_visibility()
         except Exception:
             pass
 
@@ -1747,6 +1805,8 @@ class CanvasView(QGraphicsView):
                 self._sim_timer.stop()
                 if self._transport_btn is not None:
                     self._transport_btn.setText("▶")
+            # Update visibility on pause while scrubbing
+            self._update_sim_robot_visibility()
         except Exception:
             pass
 
@@ -1775,6 +1835,8 @@ class CanvasView(QGraphicsView):
             
             if self._transport_label is not None:
                 self._transport_label.setText(f"{t_s:.2f} / {self._sim_total_time_s:.2f} s")
+            # Keep robot overlay visibility consistent with paused/zero rule
+            self._update_sim_robot_visibility()
         except Exception:
             pass
 
@@ -1813,9 +1875,111 @@ class CanvasView(QGraphicsView):
             pass
         super().keyPressEvent(event)
 
+    def wheelEvent(self, event):
+        """Zoom the view with the mouse wheel, anchored under the cursor, with limits."""
+        try:
+            # Determine scroll delta (support both angleDelta and pixelDelta)
+            delta_y = 0
+            try:
+                delta = event.angleDelta()
+                if delta is not None:
+                    delta_y = int(delta.y())
+            except Exception:
+                delta_y = 0
+            if delta_y == 0:
+                try:
+                    pdelta = event.pixelDelta()
+                    if pdelta is not None:
+                        delta_y = int(pdelta.y())
+                except Exception:
+                    delta_y = 0
+
+            if delta_y == 0:
+                # No usable delta; defer to default behavior
+                return super().wheelEvent(event)
+
+            zoom_step = 1.03
+            factor = zoom_step if delta_y > 0 else (1.0 / zoom_step)
+
+            # Compute new zoom and clamp
+            new_zoom = self._zoom_factor * factor
+            if new_zoom < self._min_zoom:
+                if self._zoom_factor <= self._min_zoom:
+                    return
+                factor = self._min_zoom / self._zoom_factor
+                self._zoom_factor = self._min_zoom
+            elif new_zoom > self._max_zoom:
+                if self._zoom_factor >= self._max_zoom:
+                    return
+                factor = self._max_zoom / self._zoom_factor
+                self._zoom_factor = self._max_zoom
+            else:
+                self._zoom_factor = new_zoom
+
+            # Apply incremental scale; anchor is UnderMouse so it zooms to cursor
+            self.scale(factor, factor)
+            event.accept()
+        except Exception:
+            # Fallback to default behavior on error
+            try:
+                super().wheelEvent(event)
+            except Exception:
+                pass
+
     # Internal hook called by RotationHandle on mouse release
     def _on_rotation_handle_released(self, index: int):
         try:
             self.rotationDragFinished.emit(int(index))
         except Exception:
             pass
+
+    def mousePressEvent(self, event):
+        """Start panning on right button; otherwise, default behavior."""
+        try:
+            if event.button() == Qt.RightButton:
+                self._is_panning = True
+                self._pan_start = event.pos()
+                try:
+                    self.viewport().setCursor(Qt.ClosedHandCursor)
+                except Exception:
+                    pass
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """While panning, move view by scrollbar deltas."""
+        try:
+            if self._is_panning and self._pan_start is not None:
+                delta = event.pos() - self._pan_start
+                try:
+                    hbar = self.horizontalScrollBar()
+                    vbar = self.verticalScrollBar()
+                    hbar.setValue(hbar.value() - delta.x())
+                    vbar.setValue(vbar.value() - delta.y())
+                except Exception:
+                    pass
+                self._pan_start = event.pos()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Stop panning on right button release; otherwise, default behavior."""
+        try:
+            if event.button() == Qt.RightButton and self._is_panning:
+                self._is_panning = False
+                self._pan_start = None
+                try:
+                    self.viewport().setCursor(Qt.ArrowCursor)
+                except Exception:
+                    pass
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mouseReleaseEvent(event)
