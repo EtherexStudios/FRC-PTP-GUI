@@ -7,7 +7,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView
 
-from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
+from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint, RangedConstraint
 from models.simulation import simulate_path, SimResult
 from PySide6.QtWidgets import QPushButton, QSlider, QLabel, QWidget, QHBoxLayout, QStyle, QToolButton
 from PySide6.QtWidgets import QGraphicsProxyWidget
@@ -22,7 +22,7 @@ FIELD_WIDTH_METERS = 8.21
 # Defaults; can be overridden at runtime from config
 ELEMENT_RECT_WIDTH_M = 0.60
 ELEMENT_RECT_HEIGHT_M = 0.60
-ELEMENT_CIRCLE_RADIUS_M = 0.005  # radius for circle elements
+ELEMENT_CIRCLE_RADIUS_M = 0.1  # radius for circle elements
 TRIANGLE_REL_SIZE = 0.55  # percent of the smaller rect dimension
 OUTLINE_THIN_M = 0.06     # thin outline (e.g., rotation dashed)
 OUTLINE_THICK_M = 0.06    # thicker outline (e.g., translation aesthetic)
@@ -612,6 +612,9 @@ class CanvasView(QGraphicsView):
         self._transport_label: Optional[QLabel] = None
         self._build_transport_controls()
 
+        # Ranged constraint preview overlay items (green path)
+        self._range_overlay_lines: List[QGraphicsLineItem] = []
+
     def _load_field_background(self, image_path: str):
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
@@ -778,6 +781,253 @@ class CanvasView(QGraphicsView):
             QTimer.singleShot(0, self._position_transport_controls)
         except Exception:
             pass
+
+    # ---------- Ranged constraint overlay ----------
+    def clear_constraint_range_overlay(self):
+        try:
+            if not self._range_overlay_lines:
+                return
+            for line in self._range_overlay_lines:
+                if line is not None and line.scene() is not None:
+                    self.graphics_scene.removeItem(line)
+            self._range_overlay_lines.clear()
+        except Exception:
+            self._range_overlay_lines = []
+
+    def show_constraint_range_overlay(self, key: str, start_ordinal: int, end_ordinal: int):
+        """Draw a green segment overlay that follows anchor-to-anchor path segments.
+
+        Rules (by examples):
+        - Selecting only the first domain element draws nothing.
+        - Selecting only the second draws the first segment.
+        - Selecting only the third draws only the second segment, etc.
+        - Selecting [first,last] draws the whole path.
+        - Selecting [first,third] draws from first->second and second->third.
+        - Selecting [second,third] draws from first->third.
+
+        Translation-domain keys map directly from anchor ordinals to segments.
+        Rotation-domain keys map events (RotationTarget/Waypoint) onto the underlying
+        anchor segments they lie on (for Waypoint: the entering segment).
+        """
+        self.clear_constraint_range_overlay()
+        if self._path is None or not self._items:
+            return
+
+        lo = int(min(start_ordinal, end_ordinal))
+        hi = int(max(start_ordinal, end_ordinal))
+        if lo <= 0 and hi <= 0:
+            return
+
+        # Gather anchor items (translation/waypoint) in scene order
+        anchor_indices: List[int] = []
+        for i, (kind, _item, _h) in enumerate(self._items):
+            if kind in ("translation", "waypoint"):
+                anchor_indices.append(i)
+
+        def _pos_for_index(idx: int) -> Optional[Tuple[float, float]]:
+            if idx < 0 or idx >= len(self._items):
+                return None
+            try:
+                _, it, _ = self._items[idx]
+                if it is None:
+                    return None
+                return (it.pos().x(), it.pos().y())
+            except Exception:
+                return None
+
+        def _draw_segment(segment_j: int):
+            # segment_j is 0-based between anchor_j and anchor_{j+1}
+            if segment_j < 0 or segment_j >= len(anchor_indices) - 1:
+                return
+            idx_a = anchor_indices[segment_j]
+            idx_b = anchor_indices[segment_j + 1]
+            pa = _pos_for_index(idx_a)
+            pb = _pos_for_index(idx_b)
+            if pa is None or pb is None:
+                return
+            line = QGraphicsLineItem(pa[0], pa[1], pb[0], pb[1])
+            line.setPen(green_pen)
+            line.setZValue(25)
+            self.graphics_scene.addItem(line)
+            self._range_overlay_lines.append(line)
+
+        green_pen = QPen(QColor("#15c915"), CONNECT_LINE_THICKNESS_M)
+        green_pen.setCapStyle(Qt.RoundCap)
+
+        # Determine domain type by key
+        is_translation_domain = key in ("max_velocity_meters_per_sec", "max_acceleration_meters_per_sec2")
+
+        if is_translation_domain:
+            A = len(anchor_indices)
+            if A < 2:
+                return
+            L = max(1, min(lo, A))
+            H = max(1, min(hi, A))
+            if L > H:
+                L, H = H, L
+            # Selecting only the first anchor draws nothing
+            if L == 1 and H == 1:
+                return
+            j_start = max(0, L - 2)                 # segment entering L (previous segment)
+            j_end = min(A - 2, H - 2)               # segment ending at H
+            if j_end < j_start:
+                return
+            for j in range(j_start, j_end + 1):
+                _draw_segment(j)
+            return
+
+        # Rotation domain with sub-segmentation at rotation events
+        # Build list of events in path order with segment indices and t parameters
+        event_item_indices: List[int] = []
+        for i, (kind, _item, _h) in enumerate(self._items):
+            if kind in ("rotation", "waypoint"):
+                event_item_indices.append(i)
+        R = len(event_item_indices)
+        if R == 0 or len(anchor_indices) < 2:
+            return
+
+        # Helper: compute (seg_idx, t) and scene pos for an event item index
+        class _Evt:
+            def __init__(self, valid: bool, seg_idx: int, t: float, pos: Optional[Tuple[float, float]]):
+                self.valid = valid
+                self.seg_idx = seg_idx
+                self.t = t
+                self.pos = pos
+
+        def _pos_on_segment(seg_idx: int, t: float) -> Optional[Tuple[float, float]]:
+            if seg_idx < 0 or seg_idx >= len(anchor_indices) - 1:
+                return None
+            idx_a = anchor_indices[seg_idx]
+            idx_b = anchor_indices[seg_idx + 1]
+            pa = _pos_for_index(idx_a)
+            pb = _pos_for_index(idx_b)
+            if pa is None or pb is None:
+                return None
+            ax, ay = pa
+            bx, by = pb
+            t = max(0.0, min(1.0, float(t)))
+            return (ax + t * (bx - ax), ay + t * (by - ay))
+
+        def _event_info(item_idx: int) -> _Evt:
+            try:
+                kind, _it, _h = self._items[item_idx]
+            except Exception:
+                return _Evt(False, -1, 0.0, None)
+            # Waypoint → prefer entering segment (anchor ordinal - 1, t = 1.0);
+            # if none (this is the very first anchor), fall back to the next segment at t = 0.0
+            if kind == "waypoint":
+                try:
+                    anchor_ord0 = anchor_indices.index(item_idx)
+                except ValueError:
+                    return _Evt(False, -1, 0.0, None)
+                seg_idx = anchor_ord0 - 1
+                t_val = 1.0
+                if seg_idx < 0:
+                    # No entering segment; use the following segment start
+                    seg_idx = anchor_ord0
+                    t_val = 0.0
+                pos = _pos_on_segment(seg_idx, t_val)
+                return _Evt(pos is not None, seg_idx, t_val, pos)
+            # RotationTarget → between previous and next anchors with t from model
+            if kind == "rotation":
+                prev_anchor_item_idx = -1
+                next_anchor_item_idx = -1
+                for j in range(item_idx - 1, -1, -1):
+                    knd, _a, _b = self._items[j]
+                    if knd in ("translation", "waypoint"):
+                        prev_anchor_item_idx = j
+                        break
+                for j in range(item_idx + 1, len(self._items)):
+                    knd, _a, _b = self._items[j]
+                    if knd in ("translation", "waypoint"):
+                        next_anchor_item_idx = j
+                        break
+                if prev_anchor_item_idx < 0 or next_anchor_item_idx < 0:
+                    return _Evt(False, -1, 0.0, None)
+                try:
+                    seg_idx = anchor_indices.index(prev_anchor_item_idx)
+                except ValueError:
+                    return _Evt(False, -1, 0.0, None)
+                # Read t from model element
+                t_val = 0.0
+                try:
+                    if self._path is not None and item_idx < len(self._path.path_elements):
+                        el = self._path.path_elements[item_idx]
+                        if isinstance(el, RotationTarget):
+                            t_val = float(getattr(el, 't_ratio', 0.0))
+                except Exception:
+                    t_val = 0.0
+                t_val = max(0.0, min(1.0, t_val))
+                pos = _pos_on_segment(seg_idx, t_val)
+                return _Evt(pos is not None, seg_idx, t_val, pos)
+            return _Evt(False, -1, 0.0, None)
+
+        # Build event info list in path order
+        events_info: List[_Evt] = [_event_info(idx) for idx in event_item_indices]
+
+        # Clamp selection to valid ordinal range
+        Lr = max(1, min(lo, R))
+        Hr = max(1, min(hi, R))
+        if Lr > Hr:
+            Lr, Hr = Hr, Lr
+
+        # Selecting only the very first event draws nothing (mirror translation's "first only" rule)
+        if Lr == 1 and Hr == 1:
+            return
+
+        # Helper to draw from (seg_a, t_a) forward to (seg_b, t_b) along path
+        def _draw_between(seg_a: int, t_a: float, seg_b: int, t_b: float):
+            if seg_a < 0 or seg_b < 0:
+                return
+            if seg_a == seg_b:
+                p0 = _pos_on_segment(seg_a, t_a)
+                p1 = _pos_on_segment(seg_b, t_b)
+                if p0 is None or p1 is None:
+                    return
+                line = QGraphicsLineItem(p0[0], p0[1], p1[0], p1[1])
+                line.setPen(green_pen)
+                line.setZValue(25)
+                self.graphics_scene.addItem(line)
+                self._range_overlay_lines.append(line)
+                return
+            # Draw tail of starting segment
+            p0 = _pos_on_segment(seg_a, t_a)
+            p1 = _pos_on_segment(seg_a, 1.0)
+            if p0 is not None and p1 is not None:
+                line = QGraphicsLineItem(p0[0], p0[1], p1[0], p1[1])
+                line.setPen(green_pen)
+                line.setZValue(25)
+                self.graphics_scene.addItem(line)
+                self._range_overlay_lines.append(line)
+            # Draw any full intermediate segments
+            for s in range(seg_a + 1, seg_b):
+                _draw_segment(s)
+            # Draw head of ending segment
+            p2 = _pos_on_segment(seg_b, 0.0)
+            p3 = _pos_on_segment(seg_b, t_b)
+            if p2 is not None and p3 is not None:
+                line = QGraphicsLineItem(p2[0], p2[1], p3[0], p3[1])
+                line.setPen(green_pen)
+                line.setZValue(25)
+                self.graphics_scene.addItem(line)
+                self._range_overlay_lines.append(line)
+
+        # Prefix: from the previous event (Lr-1) to the first selected event (Lr)
+        if Lr - 2 >= 0:
+            prev_ev = events_info[Lr - 2]
+            first_ev = events_info[Lr - 1]
+            if prev_ev.valid and first_ev.valid:
+                _draw_between(prev_ev.seg_idx, prev_ev.t, first_ev.seg_idx, first_ev.t)
+
+        # Between consecutive selected events [Lr..Hr]
+        for i_ev in range(Lr - 1, Hr - 1):
+            a = events_info[i_ev]
+            b = events_info[i_ev + 1]
+            if a.valid and b.valid:
+                _draw_between(a.seg_idx, a.t, b.seg_idx, b.t)
+            # If either is invalid, skip drawing for that pair
+
+        # No suffix: stop at the last selected event as per spec
 
     def _create_arrow_icon(self, direction: str, size: int = 16) -> QIcon:
         """Create an arrow icon for undo/redo buttons."""
@@ -957,6 +1207,11 @@ class CanvasView(QGraphicsView):
 
     def set_path(self, path: Path):
         self._path = path
+        # Clear any prior overlay linked to the previous path
+        try:
+            self.clear_constraint_range_overlay()
+        except Exception:
+            pass
         self._rebuild_items()
         # After rebuilding, ensure rotation items are properly positioned on their constraint lines
         if self._path is not None:
@@ -1884,6 +2139,11 @@ class CanvasView(QGraphicsView):
         try:
             if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
                 self.deleteSelectedRequested.emit()
+                event.accept()
+                return
+            # Toggle play/pause with Spacebar
+            if event.key() == Qt.Key_Space:
+                self._toggle_play_pause()
                 event.accept()
                 return
         except Exception:

@@ -15,6 +15,25 @@ class Constraints:
     max_acceleration_deg_per_sec2: Optional[float] = None
 
 @dataclass
+class RangedConstraint:
+    """A constraint that applies over a contiguous range of path-domain elements.
+
+    For translation-domain constraints (meters), the domain elements are anchors
+    (TranslationTarget and Waypoint) ordered along the path. The range [start_ordinal, end_ordinal]
+    refers to those anchors (1-based indexing for UI), and the effective constrained path spans
+    from the segment leading into start_ordinal through the segment ending at end_ordinal.
+
+    For rotation-domain constraints (degrees), the domain elements are rotation-bearing events
+    (RotationTarget and Waypoint) ordered along the path. The range refers to these events. The
+    effective constrained path spans from the anchor just before the first event through the last
+    event position (at the waypoint itself or inside the segment for a RotationTarget).
+    """
+    key: str  # one of: max_velocity_meters_per_sec, max_acceleration_meters_per_sec2, max_velocity_deg_per_sec, max_acceleration_deg_per_sec2
+    value: float
+    start_ordinal: int  # 1-based ordinal within the applicable domain list
+    end_ordinal: int    # inclusive, 1-based
+
+@dataclass
 class TranslationTarget(PathElement):
     x_meters : float = 0
     y_meters : float = 0
@@ -38,6 +57,7 @@ class Waypoint(PathElement):
 class Path:
     path_elements : List[PathElement] = field(default_factory=list)
     constraints : Constraints = field(default_factory=Constraints)
+    ranged_constraints : List[RangedConstraint] = field(default_factory=list)
 
     def get_element(self, index: int) -> PathElement:
         if 0 <= index < len(self.path_elements):

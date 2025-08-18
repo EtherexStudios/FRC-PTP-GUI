@@ -1,12 +1,12 @@
 from PySide6.QtWidgets import QWidget, QFormLayout, QLabel, QComboBox, QDoubleSpinBox, QMenu, QPushButton, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QSpacerItem, QMessageBox, QCheckBox
 from PySide6.QtWidgets import QListWidget, QListWidgetItem 
-from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
+from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint, RangedConstraint
 from PySide6.QtCore import Qt
-from PySide6.QtCore import Signal, QPoint, QSize, QTimer
+from PySide6.QtCore import Signal, QPoint, QSize, QTimer, QRect, QEvent
 from enum import Enum
 from typing import Optional, Tuple
 import math
-from PySide6.QtGui import QIcon, QGuiApplication
+from PySide6.QtGui import QIcon, QGuiApplication, QPainter, QColor, QPen
 from ui.canvas import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS, ELEMENT_CIRCLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M
 from typing import Any
 
@@ -347,6 +347,239 @@ class Sidebar(QWidget):
         # Fallback: return base clamped
         return bx, by
 
+    # Preview overlay signals for ranged constraints
+    constraintRangePreviewRequested = Signal(str, int, int)  # key, start_ordinal, end_ordinal
+    constraintRangePreviewCleared = Signal()
+
+    class RangeSlider(QWidget):
+        rangeChanged = Signal(int, int)
+        interactionFinished = Signal(int, int)
+
+        def __init__(self, minimum: int = 1, maximum: int = 1, parent: Optional[QWidget] = None):
+            super().__init__(parent)
+            self._min = int(minimum)
+            self._max = int(maximum)
+            self._low = int(minimum)
+            self._high = int(maximum)
+            self._dragging: Optional[str] = None  # 'low' | 'high' | 'band'
+            self._press_value: int = self._low
+            self._band_width: int = max(0, self._high - self._low)
+            self._press_low: int = self._low
+            self.setMinimumHeight(22)
+            try:
+                self.setEnabled(True)
+                self.setFocusPolicy(Qt.StrongFocus)
+                self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            except Exception:
+                pass
+            try:
+                from PySide6.QtWidgets import QSizePolicy
+                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.setMouseTracking(True)
+            except Exception:
+                pass
+
+        def setRange(self, minimum: int, maximum: int):
+            self._min = int(minimum)
+            self._max = max(int(maximum), self._min)
+            self._low = min(max(self._low, self._min), self._max)
+            self._high = min(max(self._high, self._min), self._max)
+            self.update()
+
+        def setValues(self, low: int, high: int):
+            low = int(low)
+            high = int(high)
+            if low > high:
+                low, high = high, low
+            low = min(max(low, self._min), self._max)
+            high = min(max(high, self._min), self._max)
+            changed = (low != self._low) or (high != self._high)
+            self._low, self._high = low, high
+            if changed:
+                self.rangeChanged.emit(self._low, self._high)
+                self.update()
+
+        def _setValuesInternal(self, low: int, high: int):
+            """Internal value update without emitting signals - for drag operations"""
+            low = int(low)
+            high = int(high)
+            if low > high:
+                low, high = high, low
+            low = min(max(low, self._min), self._max)
+            high = min(max(high, self._min), self._max)
+            self._low, self._high = low, high
+            self.update()
+
+        def values(self) -> Tuple[int, int]:
+            return self._low, self._high
+
+        def _pos_to_value(self, x: int) -> int:
+            rect = self.contentsRect()
+            if rect.width() <= 0:
+                return self._min
+            # Account for padding to match _value_to_pos
+            handle_w = max(8, max(3, rect.height() // 6) * 2)
+            padding = handle_w // 2
+            usable_width = max(1.0, float(rect.width() - 2 * padding))
+            ratio = (x - rect.left() - padding) / usable_width
+            ratio = max(0.0, min(1.0, ratio))  # Clamp to valid range
+            val = self._min + ratio * (self._max - self._min)
+            return int(round(val))
+
+        def _value_to_pos(self, v: int) -> int:
+            rect = self.contentsRect()
+            if self._max == self._min:
+                return rect.left()
+            # Add padding to prevent handle clipping at edges
+            handle_w = max(8, max(3, rect.height() // 6) * 2)
+            padding = handle_w // 2
+            usable_width = max(1, rect.width() - 2 * padding)
+            ratio = (float(v) - self._min) / float(self._max - self._min)
+            return int(rect.left() + padding + ratio * usable_width)
+
+        def sizeHint(self):
+            try:
+                from PySide6.QtCore import QSize
+                return QSize(200, max(22, self.minimumHeight()))
+            except Exception:
+                return super().sizeHint()
+
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            rect = self.contentsRect()
+            track_h = max(3, rect.height() // 6)
+            cy = rect.center().y()
+            # Track
+            pen = QPen(QColor('#666666'), 1)
+            painter.setPen(pen)
+            painter.setBrush(QColor('#444444'))
+            painter.drawRect(QRect(rect.left(), cy - track_h // 2, rect.width(), track_h))
+            # Tick marks at integer positions
+            try:
+                total = max(1, self._max - self._min)
+                # Limit number of ticks to avoid clutter (aim ~20 max)
+                step = 1
+                if total > 20:
+                    # choose a step that results in ~20 ticks
+                    step = max(1, (total // 20))
+                painter.setPen(QPen(QColor('#aaaaaa'), 1))
+                tick_h = max(4, track_h)
+                for v in range(self._min, self._max + 1, step):
+                    x = self._value_to_pos(v)
+                    painter.drawLine(x, cy - tick_h, x, cy + tick_h)
+            except Exception:
+                pass
+            # Selected range
+            x1 = self._value_to_pos(self._low)
+            x2 = self._value_to_pos(self._high)
+            painter.setBrush(QColor('#15c915'))
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(QRect(min(x1, x2), cy - track_h // 2, abs(x2 - x1), track_h))
+            # Handles
+            handle_w = max(8, track_h * 2)
+            painter.setBrush(QColor('#dddddd'))
+            painter.setPen(QPen(QColor('#222222'), 1))
+            painter.drawRect(QRect(x1 - handle_w // 2, cy - track_h, handle_w, track_h * 2))
+            painter.drawRect(QRect(x2 - handle_w // 2, cy - track_h, handle_w, track_h * 2))
+
+        def mousePressEvent(self, event):
+            x = int(event.position().x() if hasattr(event, 'position') else event.x())
+            y = int(event.position().y() if hasattr(event, 'position') else event.y())
+            x1 = self._value_to_pos(self._low)
+            x2 = self._value_to_pos(self._high)
+            if x1 > x2:
+                x1, x2 = x2, x1
+            rect = self.contentsRect()
+            cy = rect.center().y()
+            track_h = max(3, rect.height() // 6)
+            handle_w = max(8, track_h * 2)
+            # Make clickable area larger than visual handle for easier dragging
+            click_padding = 4
+            low_rect = QRect(x1 - handle_w // 2 - click_padding, cy - track_h - click_padding, 
+                           handle_w + 2 * click_padding, track_h * 2 + 2 * click_padding)
+            high_rect = QRect(x2 - handle_w // 2 - click_padding, cy - track_h - click_padding, 
+                            handle_w + 2 * click_padding, track_h * 2 + 2 * click_padding)
+            if low_rect.contains(x, y):
+                self._dragging = 'low'
+                self._setValuesInternal(self._pos_to_value(x), self._high)
+            elif high_rect.contains(x, y):
+                self._dragging = 'high'
+                self._setValuesInternal(self._low, self._pos_to_value(x))
+            elif x1 <= x <= x2:
+                # Drag band
+                self._dragging = 'band'
+                self._press_value = self._pos_to_value(x)
+                self._band_width = max(0, self._high - self._low)
+                self._press_low = self._low
+            else:
+                # Click on track outside -> move nearest handle
+                if abs(x - x1) <= abs(x - x2):
+                    self._dragging = 'low'
+                    self._setValuesInternal(self._pos_to_value(x), self._high)
+                else:
+                    self._dragging = 'high'
+                    self._setValuesInternal(self._low, self._pos_to_value(x))
+            # Accept event, focus, and emit preview
+            try:
+                event.accept()
+            except Exception:
+                pass
+            try:
+                self.setFocus(Qt.MouseFocusReason)
+            except Exception:
+                pass
+            try:
+                self.rangeChanged.emit(self._low, self._high)
+            except Exception:
+                pass
+
+        def mouseMoveEvent(self, event):
+            if not self._dragging:
+                return
+            x = int(event.position().x() if hasattr(event, 'position') else event.x())
+            if self._dragging == 'low':
+                self._setValuesInternal(self._pos_to_value(x), self._high)
+            elif self._dragging == 'high':
+                self._setValuesInternal(self._low, self._pos_to_value(x))
+            elif self._dragging == 'band':
+                curr_val = self._pos_to_value(x)
+                delta = curr_val - self._press_value
+                new_low = self._press_low + delta
+                new_high = new_low + self._band_width
+                # Clamp to bounds
+                if new_low < self._min:
+                    new_low = self._min
+                    new_high = self._band_width + new_low
+                if new_high > self._max:
+                    new_high = self._max
+                    new_low = new_high - self._band_width
+                self._setValuesInternal(int(new_low), int(new_high))
+            try:
+                event.accept()
+            except Exception:
+                pass
+
+        def mouseReleaseEvent(self, event):
+            # Finalize drag, emit signals to update model and show preview
+            try:
+                event.accept()
+            except Exception:
+                pass
+            
+            # Only emit signals if we were actually dragging
+            was_dragging = self._dragging is not None
+            self._dragging = None
+            
+            if was_dragging:
+                try:
+                    self.rangeChanged.emit(self._low, self._high)
+                except Exception:
+                    pass
+                try:
+                    self.interactionFinished.emit(self._low, self._high)
+                except Exception:
+                    pass
+
     def __init__(self, path=Path()):
 
         super().__init__()
@@ -495,6 +728,8 @@ class Sidebar(QWidget):
 
         # Store label references for each spinner
         self.spinners = {}
+        # Map of constraint key -> field container used in constraints layout
+        self._constraint_field_containers: dict[str, QWidget] = {}
      
         # Optional elements combobox
         self.optional_container = QWidget()
@@ -532,6 +767,16 @@ class Sidebar(QWidget):
                 control.setSingleStep(data['step'])
                 control.setRange(*data['range'])
                 control.setValue(0)
+                # Ensure better typing/paste UX and precision
+                try:
+                    control.setDecimals(3)  # show three decimal places
+                except Exception:
+                    pass
+                try:
+                    # Do not emit valueChanged on each keystroke; only when committed
+                    control.setKeyboardTracking(False)
+                except Exception:
+                    pass
                 control.setMinimumWidth(96) # Wider for readability
                 control.setMaximumWidth(200) # Allow expansion when sidebar is wider
                 control.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -584,7 +829,19 @@ class Sidebar(QWidget):
             if section == 'core':
                 self.core_layout.addRow(label, spin_row)
             elif section == 'constraints':
-                self.constraints_layout.addRow(label, spin_row)
+                # Wrap the spinner row in a stable container so later we can add a slider without replacing the row
+                field_container = QWidget()
+                vbl = QVBoxLayout(field_container)
+                vbl.setContentsMargins(0, 0, 0, 0)
+                vbl.setSpacing(3)
+                vbl.addWidget(spin_row)
+                try:
+                    label.setFocusPolicy(Qt.StrongFocus)
+                    label.installEventFilter(self)
+                except Exception:
+                    pass
+                self.constraints_layout.addRow(label, field_container)
+                self._constraint_field_containers[name] = field_container
             else:
                 self.core_layout.addRow(label, spin_row)
             self.spinners[name] = (control, label, btn, spin_row)
@@ -659,6 +916,417 @@ class Sidebar(QWidget):
         self.add_element_pop.item_selected.connect(self.on_add_element_selected)
         
         self.rebuild_points_list()
+
+        # Track inline range slider rows to avoid duplicates
+        self._range_slider_rows: dict[str, QWidget] = {}
+        self._range_sliders: dict[str, Sidebar.RangeSlider] = {}
+        self._active_preview_key: Optional[str] = None
+        # Allow sidebar-wide click to clear preview when clicking elsewhere
+        self.installEventFilter(self)
+
+    # Utilities for inline range sliders
+    def _clear_range_sliders(self):
+        try:
+            # Remove only the slider widgets; keep the constraint rows intact
+            for key, slider in list(self._range_sliders.items()):
+                try:
+                    parent = slider.parentWidget()
+                    if parent is not None and isinstance(parent.layout(), QHBoxLayout) or isinstance(parent.layout(), QVBoxLayout):
+                        try:
+                            parent.layout().removeWidget(slider)
+                        except Exception:
+                            pass
+                    slider.deleteLater()
+                except Exception:
+                    pass
+            self._range_slider_rows.clear()
+            self._range_sliders.clear()
+        except Exception:
+            pass
+
+    def _ensure_range_slider_for_key(self, name: str, control: QDoubleSpinBox, spin_row: QWidget, label_widget: QLabel):
+        domain, count = self._domain_info_for_key(name)
+        total = max(1, count)
+        # Determine current selection summary for initial setting
+        lows = []
+        highs = []
+        for rc in getattr(self.path, 'ranged_constraints', []) or []:
+            if rc.key == name:
+                lows.append(int(rc.start_ordinal))
+                highs.append(int(rc.end_ordinal))
+        low = min(lows) if lows else 1
+        high = max(highs) if highs else total
+
+        # Locate the constraints row for this label and get its current field widget
+        row_index = -1
+        current_field_widget = None
+        try:
+            for i in range(self.constraints_layout.rowCount()):
+                lab_item = self.constraints_layout.itemAt(i, QFormLayout.LabelRole)
+                if lab_item is not None and lab_item.widget() is label_widget:
+                    row_index = i
+                    break
+            if row_index >= 0:
+                current_item = self.constraints_layout.itemAt(row_index, QFormLayout.FieldRole)
+                current_field_widget = current_item.widget() if current_item is not None else None
+        except Exception:
+            current_field_widget = None
+
+        if name in self._range_sliders and name in self._range_slider_rows:
+            slider = self._range_sliders[name]
+            container = self._range_slider_rows[name]
+            # If container is not currently the field widget, re-embed below
+            if current_field_widget is not container:
+                pass  # fall through to re-embed
+            else:
+                # Update range and values; avoid re-connecting signals
+                try:
+                    slider.blockSignals(True)
+                    slider.setRange(1, total)
+                    slider.setValues(low, high)
+                finally:
+                    slider.blockSignals(False)
+                # Ensure order: spin_row then slider
+                try:
+                    vbox = container.layout()
+                    if vbox is not None:
+                        # Ensure widgets are present and ordered
+                        # Remove then insert to fix order
+                        vbox.removeWidget(spin_row)
+                        vbox.insertWidget(0, spin_row)
+                        vbox.removeWidget(slider)
+                        vbox.insertWidget(1, slider)
+                except Exception:
+                    pass
+                return
+
+        # Create a new slider row
+        slider = Sidebar.RangeSlider(1, total)
+        slider.setValues(low, high)
+        slider.setFocusPolicy(Qt.StrongFocus)
+        try:
+            slider.setEnabled(True)
+        except Exception:
+            pass
+
+        def _on_preview():
+            l, h = slider.values()
+            # Force this constraint to be the active one and show its preview
+            self._active_preview_key = name
+            try:
+                self.constraintRangePreviewRequested.emit(name, int(l), int(h))
+            except Exception:
+                pass
+
+        def _on_commit():
+            l, h = slider.values()
+            try:
+                self.aboutToChange.emit('Edit Ranged Constraint')
+            except Exception:
+                pass
+            # Replace existing ranges for this key with a single range
+            try:
+                current_val = float(getattr(self.path.constraints, name) or control.value())
+            except Exception:
+                current_val = float(control.value())
+            self.path.ranged_constraints = [rc for rc in getattr(self.path, 'ranged_constraints', []) if rc.key != name]
+            self.path.ranged_constraints.append(RangedConstraint(key=name, value=current_val, start_ordinal=int(l), end_ordinal=int(h)))
+            self.modelChanged.emit()
+            try:
+                self.userActionOccurred.emit('Edit Ranged Constraint')
+            except Exception:
+                pass
+            # Keep/restore preview to this slider after commit so it persists
+            try:
+                self._active_preview_key = name
+                self.constraintRangePreviewRequested.emit(name, int(l), int(h))
+            except Exception:
+                pass
+
+        # Connect slider signals - only one connection per signal to avoid conflicts
+        slider.rangeChanged.connect(lambda _l, _h: _on_preview())
+        # On drag finish, ensure this slider remains the active preview owner
+        slider.interactionFinished.connect(lambda _l, _h: (setattr(self, '_active_preview_key', name), _on_commit()))
+        slider.installEventFilter(self)
+        if isinstance(control, QDoubleSpinBox) and control is not None:
+            control.installEventFilter(self)
+            # Keep overlay visible when changing spinner value, but only if this constraint is currently active
+            try:
+                def _on_spinner_change(_v):
+                    # Always activate and show this constraint's preview when its spinner changes
+                    self._set_active_preview_key_and_emit(name)
+                control.valueChanged.connect(_on_spinner_change)
+            except Exception:
+                pass
+
+        # Make the label focusable for preview via keyboard/mouse and install filter
+        try:
+            if isinstance(label_widget, QLabel):
+                label_widget.setFocusPolicy(Qt.StrongFocus)
+                label_widget.installEventFilter(self)
+                # Also connect mouse press on the label directly to show preview
+                def _label_click_preview(_event=None, _n=name):
+                    try:
+                        self._active_preview_key = _n
+                        s = self._range_sliders[_n]
+                        l, h = s.values()
+                        self.constraintRangePreviewRequested.emit(_n, int(l), int(h))
+                    except Exception:
+                        pass
+                try:
+                    label_widget.mousePressEvent = (lambda ev, fn=_label_click_preview: (fn(ev)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Embed the slider under the existing field using a vertical container (row_index already computed)
+
+        # Prefer pre-built stable container if present
+        field_container = self._constraint_field_containers.get(name)
+        if field_container is None:
+            field_container = QWidget()
+            vbox = QVBoxLayout(field_container)
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(3)
+            # Ensure spinner row is inside
+            vbox.addWidget(spin_row)
+            self._constraint_field_containers[name] = field_container
+        else:
+            vbox = field_container.layout()
+        # Replace the field widget at this row with a container and add the original row + slider inside
+        try:
+            if row_index >= 0:
+                # Replace the field with our container if not already
+                current_item = self.constraints_layout.itemAt(row_index, QFormLayout.FieldRole)
+                current_widget = current_item.widget() if current_item is not None else None
+                if current_widget is not field_container:
+                    self.constraints_layout.setWidget(row_index, QFormLayout.FieldRole, field_container)
+                # Ensure order: spinner first, then slider
+                try:
+                    # Remove any existing slider from container to avoid stacking ghosts
+                    for i in reversed(range(vbox.count())):
+                        w = vbox.itemAt(i).widget()
+                        if isinstance(w, Sidebar.RangeSlider) and w is not slider:
+                            vbox.removeWidget(w)
+                            try:
+                                w.deleteLater()
+                            except Exception:
+                                pass
+                    vbox.removeWidget(spin_row)
+                except Exception:
+                    pass
+                vbox.insertWidget(0, spin_row)
+                try:
+                    vbox.removeWidget(slider)
+                except Exception:
+                    pass
+                vbox.insertWidget(1, slider)
+            else:
+                # If we cannot find the row, append safely
+                try:
+                    vbox.removeWidget(spin_row)
+                except Exception:
+                    pass
+                vbox.insertWidget(0, spin_row)
+                try:
+                    vbox.removeWidget(slider)
+                except Exception:
+                    pass
+                vbox.insertWidget(1, slider)
+                try:
+                    self.constraints_layout.addRow(label_widget, field_container)
+                except Exception:
+                    pass
+        except Exception:
+            # Fallback append
+            try:
+                vbox.addWidget(spin_row)
+                vbox.addWidget(slider)
+                self.constraints_layout.addRow(label_widget, field_container)
+            except Exception:
+                pass
+
+        self._range_sliders[name] = slider
+        self._range_slider_rows[name] = field_container
+        # Do not auto-show preview on creation to avoid reactivating overlay during non-constraint interactions
+
+    def _set_active_preview_key_and_emit(self, name: str):
+        try:
+            if name in self._range_sliders:
+                s = self._range_sliders[name]
+                l, h = s.values()
+                self._active_preview_key = name
+                self.constraintRangePreviewRequested.emit(name, int(l), int(h))
+        except Exception:
+            pass
+            
+    def _refresh_active_preview(self):
+        """Refresh the preview for the currently active constraint key."""
+        try:
+            if self._active_preview_key is not None and self._active_preview_key in self._range_sliders:
+                s = self._range_sliders[self._active_preview_key]
+                l, h = s.values()
+                self.constraintRangePreviewRequested.emit(self._active_preview_key, int(l), int(h))
+        except Exception:
+            pass
+
+    # ---- Public helpers for external widgets to control constraint preview ----
+    def clear_active_preview(self):
+        try:
+            self._active_preview_key = None
+            self.constraintRangePreviewCleared.emit()
+        except Exception:
+            pass
+
+    def is_widget_range_related(self, widget: QWidget) -> bool:
+        """Return True if the clicked widget is inside a constraint label/spinner/slider area."""
+        try:
+            if widget is None:
+                return False
+            # Sliders: clicked widget is the slider or inside it
+            for _key, slider in self._range_sliders.items():
+                try:
+                    if slider is widget:
+                        return True
+                    if hasattr(slider, 'isAncestorOf') and slider.isAncestorOf(widget):
+                        return True
+                except Exception:
+                    pass
+            # Slider containers (rows under the constraint field)
+            for _key, row in self._range_slider_rows.items():
+                if row is None:
+                    continue
+                try:
+                    if row is widget:
+                        return True
+                    if hasattr(row, 'isAncestorOf') and row.isAncestorOf(widget):
+                        return True
+                except Exception:
+                    pass
+            # Labels and spinners for keys that have sliders
+            for key in list(self._range_sliders.keys()):
+                if key not in self.spinners:
+                    continue
+                try:
+                    control, label, _btn, _row = self.spinners[key]
+                except Exception:
+                    continue
+                for w in (control, label):
+                    try:
+                        if w is widget:
+                            return True
+                        if hasattr(w, 'isAncestorOf') and w.isAncestorOf(widget):
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            return False
+        return False
+
+    def eventFilter(self, obj, event):
+        try:
+            et = event.type()
+            # Focus in on range-related widgets => show preview
+            if et == QEvent.FocusIn:
+                # Determine if this is one of our tracked sliders or spinboxes
+                for key, s in self._range_sliders.items():
+                    if obj is s:
+                        l, h = s.values()
+                        self._active_preview_key = key
+                        self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                        return False
+                for key, (control, label, _btn, _row) in self.spinners.items():
+                    if (obj is control or obj is label) and key in self._range_sliders:
+                        s = self._range_sliders[key]
+                        l, h = s.values()
+                        self._active_preview_key = key
+                        self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                        return False
+                        
+            # Handle clicks on range-related controls to show preview immediately
+            if et == QEvent.MouseButtonPress:
+                # If click is on the sidebar itself, determine the child under the cursor
+                target_widget = obj
+                try:
+                    if obj is self:
+                        ev = event
+                        pos = getattr(ev, 'position', None)
+                        if pos is not None:
+                            pt = pos().toPoint() if callable(pos) else pos.toPoint()
+                        else:
+                            pt = getattr(ev, 'pos', lambda: None)()
+                        if pt is not None:
+                            child = self.childAt(pt)
+                            if child is not None:
+                                target_widget = child
+                except Exception:
+                    target_widget = obj
+
+                # Check if clicking on any range-related control and show preview immediately
+                clicked_key = None
+                
+                # Check sliders and their containers
+                for key, row in self._range_slider_rows.items():
+                    if row is not None and (target_widget is row or row.isAncestorOf(target_widget)):
+                        clicked_key = key
+                        break
+                        
+                if clicked_key is None:
+                    for key, s in self._range_sliders.items():
+                        if target_widget is s or s.isAncestorOf(target_widget):
+                            clicked_key = key
+                            break
+                            
+                if clicked_key is None:
+                    for key, (control, label, _btn, _row) in self.spinners.items():
+                        if target_widget in (control, label) or (hasattr(control, 'isAncestorOf') and control.isAncestorOf(target_widget)):
+                            if key in self._range_sliders:
+                                clicked_key = key
+                                break
+                
+                # If we clicked on a range-related control, show its preview immediately
+                if clicked_key is not None:
+                    try:
+                        # Clear any existing preview first
+                        if self._active_preview_key != clicked_key:
+                            self.constraintRangePreviewCleared.emit()
+                        
+                        s = self._range_sliders[clicked_key]
+                        l, h = s.values()
+                        self._active_preview_key = clicked_key
+                        self.constraintRangePreviewRequested.emit(clicked_key, int(l), int(h))
+                    except Exception:
+                        pass
+                    return False
+                
+                # Clicked somewhere not tied to a constraint slider/spinner/label → clear overlay
+                self._active_preview_key = None
+                self.constraintRangePreviewCleared.emit()
+                
+                return False
+                        
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    # ---------- Ranged constraints helpers ----------
+    def _domain_info_for_key(self, key: str) -> tuple[str, int]:
+        """Return (domain_type, count) for the given key.
+        domain_type in {"translation", "rotation"}.
+        """
+        if self.path is None:
+            return "translation", 0
+        if key in ("max_velocity_meters_per_sec", "max_acceleration_meters_per_sec2"):
+            # Domain: anchors
+            count = sum(1 for e in self.path.path_elements if isinstance(e, (TranslationTarget, Waypoint)))
+            return "translation", int(count)
+        else:
+            # Domain: rotation events (RotationTarget + Waypoint)
+            count = sum(1 for e in self.path.path_elements if isinstance(e, (RotationTarget, Waypoint)))
+            return "rotation", int(count)
+
+    # NOTE: All ranged constraints are now edited inline under their value spinners using RangeSlider
     
     def _delete_via_shortcut(self):
         # Emit a deletion request so the owner can handle model + undo coherently
@@ -706,6 +1374,8 @@ class Sidebar(QWidget):
         self.optional_pop.clear()
         self.optional_display_to_key = {}
         optional_display_items = []
+        # Clear any previously injected inline range sliders to prevent duplicates
+        self._clear_range_sliders()
         # Helper: sanitize labels for menu display (strip HTML line breaks)
         def _menu_label_for_key(key: str) -> str:
             return Sidebar._label(key).replace('<br/>', ' ')
@@ -851,19 +1521,33 @@ class Sidebar(QWidget):
             for name in ['final_velocity_meters_per_sec', 'max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2']:
                 if hasattr(c, name):
                     val = getattr(c, name)
-                    if val is not None and name in self.spinners:
+                    # Detect if this key has any ranged constraint entries
+                    has_range = any(getattr(rc, 'key', None) == name for rc in (getattr(self.path, 'ranged_constraints', []) or []))
+                    range_val = None
+                    if has_range:
+                        try:
+                            for rc in (getattr(self.path, 'ranged_constraints', []) or []):
+                                if getattr(rc, 'key', None) == name:
+                                    range_val = float(getattr(rc, 'value', None))
+                                    break
+                        except Exception:
+                            range_val = None
+                    if (val is not None or has_range) and name in self.spinners:
                         control, label, btn, spin_row = self.spinners[name]
                         try:
                             control.blockSignals(True)
                             if isinstance(control, QCheckBox):
                                 control.setChecked(bool(val))
                             else:
-                                control.setValue(float(val))
+                                shown_value = float(val) if val is not None else (float(range_val) if range_val is not None else 0.0)
+                                control.setValue(shown_value)
                         finally:
                             control.blockSignals(False)
                         label.setVisible(True)
                         spin_row.setVisible(True)
                         has_constraints = True
+                        if name in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2'):
+                            self._ensure_range_slider_for_key(name, control if not isinstance(control, QCheckBox) else None, spin_row, label)
                     else:
                         display = _menu_label_for_key(name)
                         optional_display_items.append(display)
@@ -872,19 +1556,31 @@ class Sidebar(QWidget):
             for name in ['max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2']:
                 if hasattr(c, name):
                     val = getattr(c, name)
-                    if val is not None and name in self.spinners:
+                    has_range = any(getattr(rc, 'key', None) == name for rc in (getattr(self.path, 'ranged_constraints', []) or []))
+                    range_val = None
+                    if has_range:
+                        try:
+                            for rc in (getattr(self.path, 'ranged_constraints', []) or []):
+                                if getattr(rc, 'key', None) == name:
+                                    range_val = float(getattr(rc, 'value', None))
+                                    break
+                        except Exception:
+                            range_val = None
+                    if (val is not None or has_range) and name in self.spinners:
                         control, label, btn, spin_row = self.spinners[name]
                         try:
                             control.blockSignals(True)
                             if isinstance(control, QCheckBox):
                                 control.setChecked(bool(val))
                             else:
-                                control.setValue(float(val))
+                                shown_value = float(val) if val is not None else (float(range_val) if range_val is not None else 0.0)
+                                control.setValue(shown_value)
                         finally:
                             control.blockSignals(False)
                         label.setVisible(True)
                         spin_row.setVisible(True)
                         has_constraints = True
+                        self._ensure_range_slider_for_key(name, control if not isinstance(control, QCheckBox) else None, spin_row, label)
                     else:
                         display = _menu_label_for_key(name)
                         optional_display_items.append(display)
@@ -994,6 +1690,12 @@ class Sidebar(QWidget):
             if idx is None or self.path is None:
                 self.hide_spinners()
                 return
+            # Clear any active ranged preview when selecting a list element
+            try:
+                if hasattr(self, 'clear_active_preview'):
+                    self.clear_active_preview()
+            except Exception:
+                pass
             
             # Store the selected index for restoration when paths are reloaded
             self._last_selected_index = idx
@@ -1084,6 +1786,11 @@ class Sidebar(QWidget):
             # Removing a path-level constraint
             if hasattr(self.path, 'constraints'):
                 setattr(self.path.constraints, key, None)
+            # Also remove any ranged constraints for this key
+            try:
+                self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
+            except Exception:
+                pass
         else:
             if isinstance(element, Waypoint):
                 if hasattr(element.translation_target, key):
@@ -1433,7 +2140,31 @@ class Sidebar(QWidget):
                 if key in path_constraint_keys:
                     if self.path is not None and hasattr(self.path, 'constraints'):
                         clamped = Sidebar._clamp_from_metadata(key, float(value))
-                        setattr(self.path.constraints, key, clamped)
+                        # If there are ranged constraints for this key, update them and avoid setting flat constraint
+                        try:
+                            has_range = any(getattr(rc, 'key', None) == key for rc in (getattr(self.path, 'ranged_constraints', []) or []))
+                        except Exception:
+                            has_range = False
+                        if has_range:
+                            try:
+                                new_list = []
+                                for rc in (getattr(self.path, 'ranged_constraints', []) or []):
+                                    if getattr(rc, 'key', None) == key:
+                                        try:
+                                            rc.value = float(clamped)
+                                        except Exception:
+                                            rc.value = clamped
+                                    new_list.append(rc)
+                                self.path.ranged_constraints = new_list
+                            except Exception:
+                                pass
+                            # Ensure flat constraint is cleared to keep JSON clean
+                            try:
+                                setattr(self.path.constraints, key, None)
+                            except Exception:
+                                pass
+                        else:
+                            setattr(self.path.constraints, key, clamped)
                 else:
                     if key == 'profiled_rotation':
                         # Handle profiled_rotation specifically for rotation targets
@@ -1572,6 +2303,12 @@ class Sidebar(QWidget):
             return
         if index < 0 or index >= self.points_list.count():
             return
+        # Selecting from the elements list should clear any active constraint preview
+        try:
+            if hasattr(self, 'clear_active_preview'):
+                self.clear_active_preview()
+        except Exception:
+            pass
         # Defer selection to avoid re-entrancy during fullscreen/layout changes
         QTimer.singleShot(0, lambda i=index: self.points_list.setCurrentRow(i))
 
@@ -2000,6 +2737,7 @@ class Sidebar(QWidget):
                 cfg_default = self.project_manager.get_default_optional_value(real_key)
         except Exception:
             cfg_default = None
+        # Add as path-level constraint (range edited inline via RangeSlider)
         # Announce about-to-change
         label_text = Sidebar._label(real_key).replace('<br/>', ' ')
         try:
@@ -2007,8 +2745,23 @@ class Sidebar(QWidget):
         except Exception:
             pass
         base_val = float(cfg_default) if cfg_default is not None else 0.0
-        if hasattr(self.path, 'constraints'):
-            setattr(self.path.constraints, real_key, base_val)
+        # Create or replace a ranged constraint covering the full domain immediately
+        try:
+            # Determine domain size
+            _domain, count = self._domain_info_for_key(real_key)
+            total = int(count) if int(count) > 0 else 1
+            # Remove existing ranges for this key
+            self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != real_key]
+            # Append a single full-span range with the base value
+            self.path.ranged_constraints.append(RangedConstraint(key=real_key, value=base_val, start_ordinal=1, end_ordinal=total))
+        except Exception:
+            pass
+        # Ensure flat constraint is not set (avoid duplication in JSON/UI semantics)
+        try:
+            if hasattr(self.path, 'constraints'):
+                setattr(self.path.constraints, real_key, None)
+        except Exception:
+            pass
         # Refresh constraints UI
         self.refresh_current_selection()
         self.modelChanged.emit()

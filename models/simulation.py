@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from models.path_model import Path, PathElement, RotationTarget, TranslationTarget, Waypoint
+from models.path_model import Path, PathElement, RotationTarget, TranslationTarget, Waypoint, RangedConstraint
 
 
 @dataclass
@@ -502,14 +502,50 @@ def simulate_path(
 
     c = getattr(path, "constraints", None)
     final_v = _resolve_constraint(getattr(c, "final_velocity_meters_per_sec", None), cfg.get("final_velocity_meters_per_sec"), 0.0)
-    max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("max_velocity_meters_per_sec"), 3.0)
-    max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("max_acceleration_meters_per_sec2"), 2.5)
+    base_max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("max_velocity_meters_per_sec"), 3.0)
+    base_max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("max_acceleration_meters_per_sec2"), 2.5)
 
-    max_omega = math.radians(_resolve_constraint(getattr(c, "max_velocity_deg_per_sec", None), cfg.get("max_velocity_deg_per_sec"), 180.0))
-    max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("max_acceleration_deg_per_sec2"), 360.0))
+    base_max_omega = math.radians(_resolve_constraint(getattr(c, "max_velocity_deg_per_sec", None), cfg.get("max_velocity_deg_per_sec"), 180.0))
+    base_max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("max_acceleration_deg_per_sec2"), 360.0))
     
-    # DEBUG: Print angular constraints
-    print(f"DEBUG: Angular constraints - max_omega={math.degrees(max_omega):.1f}°/s, max_alpha={math.degrees(max_alpha):.1f}°/s²")
+    def _active_translation_limit(key: str, next_anchor_ord: int) -> Optional[float]:
+        """Return active translation constraint value for the given next anchor ordinal (1-based)."""
+        try:
+            for rc in getattr(path, 'ranged_constraints', []) or []:
+                if not isinstance(rc, RangedConstraint):
+                    continue
+                if rc.key != key:
+                    continue
+                if int(rc.start_ordinal) <= int(next_anchor_ord) <= int(rc.end_ordinal):
+                    return float(rc.value)
+        except Exception:
+            pass
+        return None
+
+    def _active_rotation_limit(key: str, global_s_now: float) -> Optional[float]:
+        """Return active rotation constraint value based on the next rotation event ordinal ahead of s."""
+        # global_keyframes will be initialized after cumulative_lengths is computed
+        if not global_keyframes:
+            return None
+        # Find next event ahead (first with s >= current s)
+        next_ord: Optional[int] = None
+        for i, kf in enumerate(global_keyframes):
+            if kf.s_m >= global_s_now - 1e-9:
+                next_ord = i + 1  # 1-based
+                break
+        if next_ord is None:
+            return None
+        try:
+            for rc in getattr(path, 'ranged_constraints', []) or []:
+                if not isinstance(rc, RangedConstraint):
+                    continue
+                if rc.key != key:
+                    continue
+                if int(rc.start_ordinal) <= int(next_ord) <= int(rc.end_ordinal):
+                    return float(rc.value)
+        except Exception:
+            pass
+        return None
 
     # Ideal end tolerances (zero). Use small epsilons internally for numerical robustness.
     end_translation_tolerance_m = 0.0
@@ -530,7 +566,7 @@ def simulate_path(
     first_seg = segments[0]
     start_heading_base = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
 
-    # Build global rotation keyframes (across multiple segments) and compute initial heading at s=0
+    # Build global rotation keyframes for rotation event ordinals and compute initial heading at s=0
     global_keyframes = _build_global_rotation_keyframes(path, anchor_path_indices, cumulative_lengths)
     initial_heading, _, _ = _desired_heading_for_global_s(global_keyframes, 0.0, start_heading_base)
     # Desired heading at the absolute end of the path
@@ -557,7 +593,8 @@ def simulate_path(
             rem += max(segments[k].length_m, 0.0)
         return rem
 
-    guard_time = max(25.0, (total_path_len / max(0.5, max_v)) * 5.0)
+    # Use base_max_v for guard time heuristic
+    guard_time = max(25.0, (total_path_len / max(0.5, base_max_v)) * 5.0)
 
     while t_s <= guard_time:
         if seg_idx >= len(segments):
@@ -614,6 +651,19 @@ def simulate_path(
         v_curr = max(v_proj, 0.0)
 
         remaining = remaining_distance_from(seg_idx, x, y, projected_s)
+
+        # Resolve dynamic translation constraints for this segment based on next anchor ordinal (1-based)
+        next_anchor_ord_1b = seg_idx + 2
+        max_v_eff = _active_translation_limit("max_velocity_meters_per_sec", next_anchor_ord_1b)
+        max_a_eff = _active_translation_limit("max_acceleration_meters_per_sec2", next_anchor_ord_1b)
+        max_v = float(max_v_eff) if max_v_eff is not None else float(base_max_v)
+        max_a = float(max_a_eff) if max_a_eff is not None else float(base_max_a)
+
+        # Resolve dynamic rotation constraints based on the next rotation event ahead of current s
+        max_omega_eff = _active_rotation_limit("max_velocity_deg_per_sec", global_s)
+        max_alpha_eff = _active_rotation_limit("max_acceleration_deg_per_sec2", global_s)
+        max_omega = math.radians(float(max_omega_eff)) if max_omega_eff is not None else float(base_max_omega)
+        max_alpha = math.radians(float(max_alpha_eff)) if max_alpha_eff is not None else float(base_max_alpha)
 
         # Decouple translation from rotation entirely
         max_v_dyn = max_v
