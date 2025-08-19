@@ -311,7 +311,11 @@ class Sidebar(QWidget):
         core_box_layout.setContentsMargins(6, 6, 6, 6)
         core_box_layout.setSpacing(8)
         core_box_layout.addWidget(header_row)
-        core_box_layout.addLayout(self.core_panel.form())
+        # Expose core_layout for backward compatibility
+        self.core_layout = self.core_panel.form()
+        core_box_layout.addLayout(self.core_layout)
+        # Expose form_container for backward compatibility
+        self.form_container = core_box
         main_layout.addWidget(core_box)
         
         for name, data in self.spinner_metadata.items():
@@ -468,7 +472,10 @@ class Sidebar(QWidget):
         constraints_box_layout = QVBoxLayout(constraints_box)
         constraints_box_layout.setContentsMargins(6,6,6,6)
         constraints_box_layout.setSpacing(8)
-        constraints_box_layout.addLayout(self.constraints_panel.form())
+        # Expose constraints_layout and container for backward compatibility
+        self.constraints_layout = self.constraints_panel.form()
+        constraints_box_layout.addLayout(self.constraints_layout)
+        self.constraints_form_container = constraints_box
         main_layout.addWidget(constraints_box)
         main_layout.addStretch() # Pushes all content to the top
         
