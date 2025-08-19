@@ -7,7 +7,8 @@ import copy
 import platform
 from .sidebar import Sidebar
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
-from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
+from .canvas import CanvasView
+from .canvas_constants import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from typing import Tuple
 from PySide6.QtCore import Qt, QTimer, QEvent
 from utils.project_manager import ProjectManager
