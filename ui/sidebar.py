@@ -506,21 +506,9 @@ class Sidebar(QWidget):
 
     # Utilities for inline range sliders
     def _clear_range_sliders(self):
+        # Delegate to constraints panel
         try:
-            # Remove only the slider widgets; keep the constraint rows intact
-            for key, slider in list(self._range_sliders.items()):
-                try:
-                    parent = slider.parentWidget()
-                    if parent is not None and isinstance(parent.layout(), QHBoxLayout) or isinstance(parent.layout(), QVBoxLayout):
-                        try:
-                            parent.layout().removeWidget(slider)
-                        except Exception:
-                            pass
-                    slider.deleteLater()
-                except Exception:
-                    pass
-            self._range_slider_rows.clear()
-            self._range_sliders.clear()
+            self.constraints_panel.clear_inline_sliders()
         except Exception:
             pass
 
@@ -580,14 +568,8 @@ class Sidebar(QWidget):
                     pass
                 return
 
-        # Create a new slider row
-        slider = RangeSlider(1, total)
-        slider.setValues(low, high)
-        slider.setFocusPolicy(Qt.StrongFocus)
-        try:
-            slider.setEnabled(True)
-        except Exception:
-            pass
+        # Create or update inline slider via constraints panel
+        self.constraints_panel.ensure_inline_slider(name, total, low, high, spin_row, label_widget)
 
         def _on_preview():
             l, h = slider.values()
@@ -624,10 +606,11 @@ class Sidebar(QWidget):
                 pass
 
         # Connect slider signals - only one connection per signal to avoid conflicts
-        slider.rangeChanged.connect(lambda _l, _h: _on_preview())
-        # On drag finish, ensure this slider remains the active preview owner
-        slider.interactionFinished.connect(lambda _l, _h: (setattr(self, '_active_preview_key', name), _on_commit()))
-        slider.installEventFilter(self)
+        # Wire preview/commit using constraints panel's rangeChanged
+        try:
+            self.constraints_panel.rangeChanged.connect(lambda k, l, h: (self._set_active_preview_key_and_emit(k) if k == name else None))
+        except Exception:
+            pass
         if isinstance(control, QDoubleSpinBox) and control is not None:
             control.installEventFilter(self)
             # Keep overlay visible when changing spinner value, but only if this constraint is currently active
@@ -660,75 +643,9 @@ class Sidebar(QWidget):
         except Exception:
             pass
 
-        # Embed the slider under the existing field using a vertical container (row_index already computed)
-
-        # Prefer pre-built stable container if present
-        field_container = self._constraint_field_containers.get(name)
-        if field_container is None:
-            field_container = QWidget()
-            vbox = QVBoxLayout(field_container)
-            vbox.setContentsMargins(0, 0, 0, 0)
-            vbox.setSpacing(3)
-            # Ensure spinner row is inside
-            vbox.addWidget(spin_row)
-            self._constraint_field_containers[name] = field_container
-        else:
-            vbox = field_container.layout()
-        # Replace the field widget at this row with a container and add the original row + slider inside
-        try:
-            if row_index >= 0:
-                # Replace the field with our container if not already
-                current_item = self.constraints_layout.itemAt(row_index, QFormLayout.FieldRole)
-                current_widget = current_item.widget() if current_item is not None else None
-                if current_widget is not field_container:
-                    self.constraints_layout.setWidget(row_index, QFormLayout.FieldRole, field_container)
-                # Ensure order: spinner first, then slider
-                try:
-                    # Remove any existing slider from container to avoid stacking ghosts
-                    for i in reversed(range(vbox.count())):
-                        w = vbox.itemAt(i).widget()
-                        if isinstance(w, RangeSlider) and w is not slider:
-                            vbox.removeWidget(w)
-                            try:
-                                w.deleteLater()
-                            except Exception:
-                                pass
-                    vbox.removeWidget(spin_row)
-                except Exception:
-                    pass
-                vbox.insertWidget(0, spin_row)
-                try:
-                    vbox.removeWidget(slider)
-                except Exception:
-                    pass
-                vbox.insertWidget(1, slider)
-            else:
-                # If we cannot find the row, append safely
-                try:
-                    vbox.removeWidget(spin_row)
-                except Exception:
-                    pass
-                vbox.insertWidget(0, spin_row)
-                try:
-                    vbox.removeWidget(slider)
-                except Exception:
-                    pass
-                vbox.insertWidget(1, slider)
-                try:
-                    self.constraints_layout.addRow(label_widget, field_container)
-                except Exception:
-                    pass
-        except Exception:
-            # Fallback append
-            try:
-                vbox.addWidget(spin_row)
-                vbox.addWidget(slider)
-                self.constraints_layout.addRow(label_widget, field_container)
-            except Exception:
-                pass
-
-        self._range_sliders[name] = slider
-        self._range_slider_rows[name] = field_container
+        # Track local maps for compatibility but handled by panel
+        self._range_sliders[name] = None
+        self._range_slider_rows[name] = None
         # Do not auto-show preview on creation to avoid reactivating overlay during non-constraint interactions
 
     def _set_active_preview_key_and_emit(self, name: str):
