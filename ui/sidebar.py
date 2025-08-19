@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import math
 from PySide6.QtGui import QIcon, QGuiApplication, QPainter, QColor, QPen
 from ui.canvas_constants import FIELD_LENGTH_METERS, FIELD_WIDTH_METERS, ELEMENT_CIRCLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M
+from .sidebar_meta import SPINNER_METADATA as _SPINNER_METADATA, DEGREES_TO_RADIANS_ATTR_MAP as _DEG2RAD
 from typing import Any
 
 from .sidebar_widgets import ElementType, CustomList, PopupCombobox, RangeSlider
@@ -27,29 +28,10 @@ class Sidebar(QWidget):
     aboutToChange = Signal(str)
     # Emitted after the model is mutated; provides a human-readable description
     userActionOccurred = Signal(str)
-    spinner_metadata = {
-        # Put rotation first so it appears at the top of Core
-        'rotation_degrees': {'label': 'Rotation (deg)', 'step': 1.0, 'range': (-180.0, 180.0), 'removable': False, 'section': 'core'},
-        'x_meters': {'label': 'X (m)', 'step': 0.05, 'range': (0.0, float(FIELD_LENGTH_METERS)), 'removable': False, 'section': 'core'},
-        'y_meters': {'label': 'Y (m)', 'step': 0.05, 'range': (0.0, float(FIELD_WIDTH_METERS)), 'removable': False, 'section': 'core'},
-        # Handoff radius is a core control for TranslationTarget and Waypoint
-        'intermediate_handoff_radius_meters': {'label': 'Handoff Radius (m)', 'step': 0.05, 'range': (0, 99999), 'removable': False, 'section': 'core'}, 
-        # Ratio along the segment between previous and next anchors for rotation elements (0..1)
-        'rotation_position_ratio': {'label': 'Rotation Pos (0–1)', 'step': 0.01, 'range': (0.0, 1.0), 'removable': False, 'section': 'core'},
-        # Boolean checkbox for profiled rotation
-        'profiled_rotation': {'label': 'Profiled Rotation', 'type': 'checkbox', 'removable': False, 'section': 'core'},
-        # Constraints (optional)
-        'final_velocity_meters_per_sec': {'label': 'Final Velocity (m/s)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
-        'max_velocity_meters_per_sec': {'label': 'Max Velocity (m/s)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
-        'max_acceleration_meters_per_sec2': {'label': 'Max Acceleration (m/s²)', 'step': 0.1, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
-        'max_velocity_deg_per_sec': {'label': 'Max Rot Velocity<br/>(deg/s)', 'step': 1.0, 'range': (0, 99999), 'removable': True, 'section': 'constraints'},
-        'max_acceleration_deg_per_sec2': {'label': 'Max Rot Acceleration<br/>(deg/s²)', 'step': 1.0, 'range': (0, 99999), 'removable': True, 'section': 'constraints'}
-    }        
+    spinner_metadata = _SPINNER_METADATA
 
     # Map UI spinner keys to model attribute names (for rotation fields in degrees)
-    degrees_to_radians_attr_map = {
-        'rotation_degrees': 'rotation_radians'
-    }
+    degrees_to_radians_attr_map = _DEG2RAD
 
     @classmethod
     def _meta(cls, key: str) -> dict:
