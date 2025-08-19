@@ -266,40 +266,11 @@ class Sidebar(QWidget):
         title_bar_layout.addStretch()
         main_layout.addWidget(self.title_bar)
         
-        # Form section for editable properties
-        self.form_container = QGroupBox()
-        self.form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.form_container.setStyleSheet("""
-            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
-            QLabel { color: #f0f0f0; }
-        """)
-        
-        # Main layout for the group box
-        group_box_spinner_layout = QVBoxLayout(self.form_container)
-        group_box_spinner_layout.setContentsMargins(6, 6, 6, 6)
-        group_box_spinner_layout.setSpacing(8)
+        # Core properties panel (modular)
+        self.core_panel = SidebarCore()
 
-        # Properties form (no collapsibles): keep type selector and core spinners together
-        self.core_page = QWidget()
-        self.core_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.core_layout = QFormLayout(self.core_page)
-        self.core_layout.setLabelAlignment(Qt.AlignRight)
-        self.core_layout.setVerticalSpacing(8)
-        self.core_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-        # Separate constraints group below with its own title bar (created later) and form layout
-        self.constraints_form_container = QGroupBox()
-        self.constraints_form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.constraints_form_container.setStyleSheet(
-            """
-            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
-            QLabel { color: #f0f0f0; }
-            """
-        )
-        self.constraints_layout = QFormLayout(self.constraints_form_container)
-        self.constraints_layout.setLabelAlignment(Qt.AlignRight)
-        self.constraints_layout.setVerticalSpacing(8)
-        self.constraints_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        # Constraints properties panel (modular)
+        self.constraints_panel = SidebarConstraints()
         
 
         # Store label references for each spinner
@@ -325,9 +296,23 @@ class Sidebar(QWidget):
         header_row_layout.setSpacing(6)
         header_row_layout.addWidget(self.type_label)
         header_row_layout.addWidget(self.optional_container, 1)
-        group_box_spinner_layout.addWidget(header_row)
-        # Place the core form (type + core spinners) directly in this group
-        group_box_spinner_layout.addWidget(self.core_page)
+        # Assemble core panel container
+        core_container = QVBoxLayout()
+        core_container.setContentsMargins(6, 6, 6, 6)
+        core_container.setSpacing(8)
+        core_box = QGroupBox()
+        core_box.setStyleSheet(
+            """
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+            QLabel { color: #f0f0f0; }
+            """
+        )
+        core_box_layout = QVBoxLayout(core_box)
+        core_box_layout.setContentsMargins(6, 6, 6, 6)
+        core_box_layout.setSpacing(8)
+        core_box_layout.addWidget(header_row)
+        core_box_layout.addLayout(self.core_panel.form())
+        main_layout.addWidget(core_box)
         
         for name, data in self.spinner_metadata.items():
             # Create either a checkbox or a spinbox based on the type
@@ -472,7 +457,19 @@ class Sidebar(QWidget):
         self.optional_display_to_key = {}
 
         main_layout.addWidget(self.constraints_title_bar)
-        main_layout.addWidget(self.constraints_form_container)
+        # Constraints form container using modular panel
+        constraints_box = QGroupBox()
+        constraints_box.setStyleSheet(
+            """
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+            QLabel { color: #f0f0f0; }
+            """
+        )
+        constraints_box_layout = QVBoxLayout(constraints_box)
+        constraints_box_layout.setContentsMargins(6,6,6,6)
+        constraints_box_layout.setSpacing(8)
+        constraints_box_layout.addLayout(self.constraints_panel.form())
+        main_layout.addWidget(constraints_box)
         main_layout.addStretch() # Pushes all content to the top
         
         # Defer selection handling to the next event loop to avoid re-entrancy
