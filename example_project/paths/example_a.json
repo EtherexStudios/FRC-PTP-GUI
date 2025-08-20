@@ -1,10 +1,25 @@
 {
+  "constraints": {
+    "end_translation_tolerance_meters": 0.03
+  },
   "ranged_constraints": [
     {
       "key": "max_acceleration_meters_per_sec2",
       "value": 14.0,
       "start_ordinal": 0,
       "end_ordinal": 6
+    },
+    {
+      "key": "max_velocity_deg_per_sec",
+      "value": 720.0,
+      "start_ordinal": 0,
+      "end_ordinal": 7
+    },
+    {
+      "key": "max_acceleration_deg_per_sec2",
+      "value": 2000.0,
+      "start_ordinal": 0,
+      "end_ordinal": 7
     }
   ],
   "path_elements": [
