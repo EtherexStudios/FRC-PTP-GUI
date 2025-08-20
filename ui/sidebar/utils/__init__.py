@@ -1,4 +1,4 @@
-from .constants import ElementType, SPINNER_METADATA, DEGREES_TO_RADIANS_ATTR_MAP, PATH_CONSTRAINT_KEYS
+from .constants import ElementType, SPINNER_METADATA, DEGREES_TO_RADIANS_ATTR_MAP, PATH_CONSTRAINT_KEYS, NON_RANGED_CONSTRAINT_KEYS
 from .element_helpers import (
     clamp_from_metadata,
     get_element_position,
@@ -13,6 +13,7 @@ __all__ = [
     'SPINNER_METADATA',
     'DEGREES_TO_RADIANS_ATTR_MAP',
     'PATH_CONSTRAINT_KEYS',
+    'NON_RANGED_CONSTRAINT_KEYS',
     'clamp_from_metadata',
     'get_element_position',
     'get_neighbor_positions',

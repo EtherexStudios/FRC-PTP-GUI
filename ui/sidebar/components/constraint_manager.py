@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QWidget, QLabel, QDoubleSpinBox, QVBoxLayout, QFor
 from PySide6.QtGui import QCursor, QMouseEvent
 from models.path_model import Path, RangedConstraint
 from ..widgets import RangeSlider
-from ..utils import SPINNER_METADATA, PATH_CONSTRAINT_KEYS
+from ..utils import SPINNER_METADATA, PATH_CONSTRAINT_KEYS, NON_RANGED_CONSTRAINT_KEYS
 
 
 class ConstraintManager(QObject):
@@ -63,26 +63,34 @@ class ConstraintManager(QObject):
             
         if value is None:
             value = self.get_default_value(key)
-            
-        # Create or replace a ranged constraint covering the full domain immediately
-        try:
-            # Determine domain size
-            domain, count = self.get_domain_info_for_key(key)
-            total = int(count) if int(count) > 0 else 1
-            
-            # Remove existing ranges for this key
-            self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
-            
-            # Append a single full-span range with the base value
-            self.path.ranged_constraints.append(RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total))
-        except Exception:
-            pass
-            
-        # Ensure flat constraint is not set (avoid duplication in JSON/UI semantics)
-        try:
-            setattr(self.path.constraints, key, None)
-        except Exception:
-            pass
+        # For non-ranged keys, store directly on flat constraints
+        if key in NON_RANGED_CONSTRAINT_KEYS:
+            try:
+                setattr(self.path.constraints, key, float(value))
+            except Exception:
+                pass
+            # Remove any stray ranged constraints of same key (defensive)
+            try:
+                self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
+            except Exception:
+                pass
+        else:
+            # Create or replace a ranged constraint covering the full domain immediately
+            try:
+                # Determine domain size
+                domain, count = self.get_domain_info_for_key(key)
+                total = int(count) if int(count) > 0 else 1
+                # Remove existing ranges for this key
+                self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
+                # Append a single full-span range with the base value
+                self.path.ranged_constraints.append(RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total))
+            except Exception:
+                pass
+            # Ensure flat constraint is cleared to avoid duplication
+            try:
+                setattr(self.path.constraints, key, None)
+            except Exception:
+                pass
             
         self.constraintAdded.emit(key, value)
         return True
@@ -92,17 +100,23 @@ class ConstraintManager(QObject):
         if self.path is None or not hasattr(self.path, 'constraints'):
             return False
             
-        # Remove flat constraint
-        try:
-            setattr(self.path.constraints, key, None)
-        except Exception:
-            pass
-            
-        # Remove any ranged constraints for this key
-        try:
-            self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
-        except Exception:
-            pass
+        if key in NON_RANGED_CONSTRAINT_KEYS:
+            # Remove flat constraint only
+            try:
+                setattr(self.path.constraints, key, None)
+            except Exception:
+                pass
+        else:
+            # Remove flat constraint
+            try:
+                setattr(self.path.constraints, key, None)
+            except Exception:
+                pass
+            # Remove any ranged constraints for this key
+            try:
+                self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc.key != key]
+            except Exception:
+                pass
             
         self.constraintRemoved.emit(key)
         return True
@@ -111,33 +125,38 @@ class ConstraintManager(QObject):
         """Update the value of a constraint."""
         if self.path is None or not hasattr(self.path, 'constraints'):
             return
-            
-        # If there are ranged constraints for this key, update them
-        try:
-            has_range = any(getattr(rc, 'key', None) == key for rc in (getattr(self.path, 'ranged_constraints', []) or []))
-        except Exception:
-            has_range = False
-            
-        if has_range:
+        if key in NON_RANGED_CONSTRAINT_KEYS:
+            # Direct flat update
             try:
-                new_list = []
-                for rc in (getattr(self.path, 'ranged_constraints', []) or []):
-                    if getattr(rc, 'key', None) == key:
-                        try:
-                            rc.value = float(value)
-                        except Exception:
-                            rc.value = value
-                    new_list.append(rc)
-                self.path.ranged_constraints = new_list
+                setattr(self.path.constraints, key, float(value))
             except Exception:
-                pass
-            # Ensure flat constraint is cleared to keep JSON clean
-            try:
-                setattr(self.path.constraints, key, None)
-            except Exception:
-                pass
+                setattr(self.path.constraints, key, value)
         else:
-            setattr(self.path.constraints, key, value)
+            # If there are ranged constraints for this key, update them
+            try:
+                has_range = any(getattr(rc, 'key', None) == key for rc in (getattr(self.path, 'ranged_constraints', []) or []))
+            except Exception:
+                has_range = False
+            if has_range:
+                try:
+                    new_list = []
+                    for rc in (getattr(self.path, 'ranged_constraints', []) or []):
+                        if getattr(rc, 'key', None) == key:
+                            try:
+                                rc.value = float(value)
+                            except Exception:
+                                rc.value = value
+                        new_list.append(rc)
+                    self.path.ranged_constraints = new_list
+                except Exception:
+                    pass
+                # Ensure flat constraint is cleared to keep JSON clean
+                try:
+                    setattr(self.path.constraints, key, None)
+                except Exception:
+                    pass
+            else:
+                setattr(self.path.constraints, key, value)
             
         self.constraintValueChanged.emit(key, value)
         

@@ -13,6 +13,9 @@ class Constraints:
     max_acceleration_meters_per_sec2: Optional[float] = None
     max_velocity_deg_per_sec: Optional[float] = None
     max_acceleration_deg_per_sec2: Optional[float] = None
+    # Added non-ranged terminal tolerances (stored with path, not per-element ranges)
+    end_translation_tolerance_meters: Optional[float] = None
+    end_rotation_tolerance_deg: Optional[float] = None
 
 @dataclass
 class RangedConstraint:

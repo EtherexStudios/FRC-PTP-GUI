@@ -81,17 +81,29 @@ class CanvasView(QGraphicsView):
             return
         self._field_pixmap_item = QGraphicsPixmapItem(pixmap); self._field_pixmap_item.setZValue(-10)
         if pixmap.width() > 0 and pixmap.height() > 0:
-            s = None
+            # Scale the background so it fully fits inside the logical field rectangle
+            # while preserving aspect ratio. Previously a hard‑coded PPM (200) was applied
+            # for field25.png which could make the scaled pixmap wider than
+            # FIELD_LENGTH_METERS, causing the right edge to be clipped when the view
+            # fit the sceneRect. We now always apply aspect-fit scaling.
             try:
-                if os.path.basename(image_path) == "field25.png":
-                    ppm = 200.0; s = 1.0/ppm
+                scale_w = FIELD_LENGTH_METERS / float(pixmap.width())
+                scale_h = FIELD_WIDTH_METERS / float(pixmap.height())
+                s = min(scale_w, scale_h)
             except Exception:
-                s = None
-            if s is None:
-                s = min(FIELD_LENGTH_METERS/float(pixmap.width()), FIELD_WIDTH_METERS/float(pixmap.height()))
+                s = 1.0
             self._field_pixmap_item.setTransform(QTransform().scale(s, s))
-            h_scaled = pixmap.height()*s
-            self._field_pixmap_item.setPos(0.0, FIELD_WIDTH_METERS - h_scaled)
+            # Bottom-align the image within the field height so (0,0) remains top-left in model coords.
+            h_scaled = pixmap.height() * s
+            w_scaled = pixmap.width() * s
+            # If width ends up smaller than field length (letterboxing), center it; else anchor at x=0.
+            x_offset = 0.0
+            try:
+                if w_scaled < FIELD_LENGTH_METERS:
+                    x_offset = (FIELD_LENGTH_METERS - w_scaled) / 2.0
+            except Exception:
+                x_offset = 0.0
+            self._field_pixmap_item.setPos(x_offset, FIELD_WIDTH_METERS - h_scaled)
         self.graphics_scene.addItem(self._field_pixmap_item)
 
     def set_project_manager(self, project_manager):

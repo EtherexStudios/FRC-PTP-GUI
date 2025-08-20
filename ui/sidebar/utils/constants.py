@@ -93,6 +93,20 @@ SPINNER_METADATA = {
         'range': (0, 99999), 
         'removable': True, 
         'section': 'constraints'
+    },
+    'end_translation_tolerance_meters': {
+        'label': 'End Translation Tol (m)',
+        'step': 0.005,
+        'range': (0.0, 5.0),
+        'removable': True,
+        'section': 'constraints'
+    },
+    'end_rotation_tolerance_deg': {
+        'label': 'End Rotation Tol (deg)',
+        'step': 0.1,
+        'range': (0.0, 180.0),
+        'removable': True,
+        'section': 'constraints'
     }
 }        
 
@@ -103,9 +117,20 @@ DEGREES_TO_RADIANS_ATTR_MAP = {
 
 # Path constraint keys
 PATH_CONSTRAINT_KEYS = [
+    # Non-ranged first for clarity in optional add menu
     'final_velocity_meters_per_sec',
+    'end_translation_tolerance_meters',
+    'end_rotation_tolerance_deg',
+    # Ranged-capable constraints
     'max_velocity_meters_per_sec',
     'max_acceleration_meters_per_sec2',
     'max_velocity_deg_per_sec',
     'max_acceleration_deg_per_sec2',
+]
+
+# Subset of constraint keys that are always stored as flat (non-ranged) values
+NON_RANGED_CONSTRAINT_KEYS = [
+    'final_velocity_meters_per_sec',
+    'end_translation_tolerance_meters',
+    'end_rotation_tolerance_deg',
 ]
