@@ -6,6 +6,7 @@ import os
 import copy
 import platform
 from .sidebar import Sidebar
+from .sidebar.utils import clamp_from_metadata
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
 from .canvas import CanvasView, FIELD_LENGTH_METERS, FIELD_WIDTH_METERS
 from typing import Tuple
@@ -1044,8 +1045,8 @@ class MainWindow(QMainWindow):
             return
         
         # Clamp via sidebar metadata to keep UI and model consistent
-        x_m = Sidebar._clamp_from_metadata('x_meters', float(x_m))
-        y_m = Sidebar._clamp_from_metadata('y_meters', float(y_m))
+        x_m = clamp_from_metadata('x_meters', float(x_m))
+        y_m = clamp_from_metadata('y_meters', float(y_m))
         elem = self.path.path_elements[index]
         if isinstance(elem, TranslationTarget):
             elem.x_meters = x_m
@@ -1101,7 +1102,7 @@ class MainWindow(QMainWindow):
         elem = self.path.path_elements[index]
         # Clamp using sidebar metadata (degrees domain), then convert back to radians
         degrees = math.degrees(radians)
-        degrees = Sidebar._clamp_from_metadata('rotation_degrees', float(degrees))
+        degrees = clamp_from_metadata('rotation_degrees', float(degrees))
         clamped_radians = math.radians(degrees)
         if isinstance(elem, RotationTarget):
             elem.rotation_radians = clamped_radians
@@ -1163,8 +1164,8 @@ class MainWindow(QMainWindow):
         proj_x = ax + t * dx
         proj_y = ay + t * dy
         # Final clamp to field limits
-        proj_x = Sidebar._clamp_from_metadata('x_meters', proj_x)
-        proj_y = Sidebar._clamp_from_metadata('y_meters', proj_y)
+        proj_x = clamp_from_metadata('x_meters', proj_x)
+        proj_y = clamp_from_metadata('y_meters', proj_y)
         return proj_x, proj_y
 
     def _on_canvas_drag_finished(self, index: int):
