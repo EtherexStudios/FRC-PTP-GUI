@@ -22,6 +22,8 @@ class RangeSlider(QWidget):
         self._press_value: int = self._low
         self._band_width: int = max(0, self._high - self._low)
         self._press_low: int = self._low
+        # Minimum number of notches the handles must be apart. 1 prevents overlap.
+        self._min_separation: int = 1
         self.setMinimumHeight(22)
         
         try:
@@ -43,6 +45,15 @@ class RangeSlider(QWidget):
         self._max = max(int(maximum), self._min)
         self._low = min(max(self._low, self._min), self._max)
         self._high = min(max(self._high, self._min), self._max)
+        # Enforce minimum separation after range change
+        self._low, self._high = self._apply_min_separation(self._low, self._high)
+        self.update()
+
+    def setMinimumSeparation(self, separation: int):
+        """Set the minimum required separation (in notches) between handles."""
+        self._min_separation = max(0, int(separation))
+        # Re-apply constraint to current values
+        self._low, self._high = self._apply_min_separation(self._low, self._high)
         self.update()
 
     def setValues(self, low: int, high: int):
@@ -53,6 +64,7 @@ class RangeSlider(QWidget):
             low, high = high, low
         low = min(max(low, self._min), self._max)
         high = min(max(high, self._min), self._max)
+        low, high = self._apply_min_separation(low, high)
         changed = (low != self._low) or (high != self._high)
         self._low, self._high = low, high
         if changed:
@@ -67,8 +79,51 @@ class RangeSlider(QWidget):
             low, high = high, low
         low = min(max(low, self._min), self._max)
         high = min(max(high, self._min), self._max)
+        low, high = self._apply_min_separation(low, high)
         self._low, self._high = low, high
         self.update()
+
+    def _apply_min_separation(self, low: int, high: int) -> Tuple[int, int]:
+        """Ensure that high - low >= effective minimum separation.
+        Attempts to resolve according to the drag context for natural behavior.
+        """
+        # Effective separation cannot exceed the available span
+        total_span = max(0, self._max - self._min)
+        sep = min(max(0, self._min_separation), total_span)
+        if sep <= 0:
+            return low, high
+        if (high - low) >= sep:
+            return low, high
+
+        # Need to adjust values to satisfy separation
+        if self._dragging == 'low':
+            # Keep high as requested, move low leftwards
+            high = min(high, self._max)
+            low = min(high - sep, self._max - sep)
+            low = max(low, self._min)
+        elif self._dragging == 'high':
+            # Keep low as requested, move high rightwards
+            low = max(low, self._min)
+            high = max(low + sep, self._min + sep)
+            high = min(high, self._max)
+        elif self._dragging == 'band':
+            # Maintain at least sep width while respecting bounds
+            low = max(low, self._min)
+            # Prefer expanding to the right if possible
+            if low + sep <= self._max:
+                high = low + sep
+            else:
+                high = self._max
+                low = max(self._min, high - sep)
+        else:
+            # No specific drag context (programmatic set). Prefer expanding upwards.
+            low = max(low, self._min)
+            if low + sep <= self._max:
+                high = low + sep
+            else:
+                high = self._max
+                low = max(self._min, high - sep)
+        return int(low), int(high)
 
     def values(self) -> Tuple[int, int]:
         """Get the current range values."""
