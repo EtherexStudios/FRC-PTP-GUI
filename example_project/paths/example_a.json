@@ -2,32 +2,34 @@
   "constraints": {
     "end_rotation_tolerance_deg": 180.0
   },
-  "ranged_constraints": [
-    {
-      "key": "max_velocity_deg_per_sec",
-      "value": 718.0,
-      "start_ordinal": 0,
-      "end_ordinal": 7
-    },
-    {
-      "key": "max_acceleration_meters_per_sec2",
-      "value": 14.0,
-      "start_ordinal": 0,
-      "end_ordinal": 6
-    },
-    {
-      "key": "max_acceleration_deg_per_sec2",
-      "value": 2000.0,
-      "start_ordinal": 0,
-      "end_ordinal": 7
-    },
-    {
-      "key": "max_acceleration_deg_per_sec2",
-      "value": 2000.0,
-      "start_ordinal": 0,
-      "end_ordinal": 7
-    }
-  ],
+  "ranged_constraints": {
+    "max_velocity_deg_per_sec": [
+      {
+        "value": 718.0,
+        "start_ordinal": 0,
+        "end_ordinal": 7
+      }
+    ],
+    "max_acceleration_meters_per_sec2": [
+      {
+        "value": 14.0,
+        "start_ordinal": 0,
+        "end_ordinal": 6
+      }
+    ],
+    "max_acceleration_deg_per_sec2": [
+      {
+        "value": 2000.0,
+        "start_ordinal": 0,
+        "end_ordinal": 7
+      },
+      {
+        "value": 2000.0,
+        "start_ordinal": 0,
+        "end_ordinal": 7
+      }
+    ]
+  },
   "path_elements": [
     {
       "type": "waypoint",

@@ -376,13 +376,12 @@ class ProjectManager:
         result: Dict[str, Any] = {}
         if constraints_obj:
             result["constraints"] = constraints_obj
-        # Ranged constraints block
-        ranged_list: List[Dict[str, Any]] = []
+        # Ranged constraints block (grouped by type/key)
+        ranged_grouped: Dict[str, List[Dict[str, Any]]] = {}
         try:
-            for rc in getattr(path, 'ranged_constraints', []) or []:
+            for rc in (getattr(path, 'ranged_constraints', []) or []):
                 if not isinstance(rc, RangedConstraint):
                     continue
-                # Only store supported keys
                 if rc.key not in (
                     "max_velocity_meters_per_sec",
                     "max_acceleration_meters_per_sec2",
@@ -390,7 +389,6 @@ class ProjectManager:
                     "max_acceleration_deg_per_sec2",
                 ):
                     continue
-                # Store ordinals as 0-based in JSON while keeping internal 1-based
                 try:
                     start_zero_based = int(rc.start_ordinal) - 1
                     end_zero_based = int(rc.end_ordinal) - 1
@@ -401,16 +399,16 @@ class ProjectManager:
                 except Exception:
                     start_zero_based = 0
                     end_zero_based = 0
-                ranged_list.append({
-                    "key": str(rc.key),
+                entry = {
                     "value": float(rc.value),
                     "start_ordinal": start_zero_based,
                     "end_ordinal": end_zero_based,
-                })
+                }
+                ranged_grouped.setdefault(str(rc.key), []).append(entry)
         except Exception:
-            ranged_list = []
-        if ranged_list:
-            result["ranged_constraints"] = ranged_list
+            ranged_grouped = {}
+        if ranged_grouped:
+            result["ranged_constraints"] = ranged_grouped
         result["path_elements"] = items
         return result
 
@@ -591,69 +589,72 @@ class ProjectManager:
             pass
         # Now that path elements are available, parse ranged constraints with domain-aware conversion
         try:
+            # Normalize ranged block into a list of {key,value,start_ordinal,end_ordinal}
+            normalized: List[Dict[str, Any]] = []
             if isinstance(ranged_block, list):
-                # Compute domain sizes
-                anchor_count = 0  # Translation anchors: TranslationTarget or Waypoint
-                rotation_event_count = 0  # Rotation events: RotationTarget or Waypoint
-                for e in path.path_elements:
-                    if isinstance(e, TranslationTarget) or isinstance(e, Waypoint):
-                        anchor_count += 1
-                    if isinstance(e, RotationTarget) or isinstance(e, Waypoint):
-                        rotation_event_count += 1
-
-                for entry in ranged_block:
-                    if not isinstance(entry, dict):
+                normalized = [entry for entry in ranged_block if isinstance(entry, dict)]
+            elif isinstance(ranged_block, dict):
+                for k, arr in ranged_block.items():
+                    if not isinstance(arr, list):
                         continue
-                    key = str(entry.get("key", ""))
-                    if key not in (
-                        "max_velocity_meters_per_sec",
-                        "max_acceleration_meters_per_sec2",
-                        "max_velocity_deg_per_sec",
-                        "max_acceleration_deg_per_sec2",
-                    ):
-                        continue
-                    value = self._opt_float(entry.get("value"))
-                    start_ord = entry.get("start_ordinal")
-                    end_ord = entry.get("end_ordinal")
-                    try:
-                        if value is None:
+                    for entry in arr:
+                        if not isinstance(entry, dict):
                             continue
-                        start_int = int(start_ord) if start_ord is not None else 0
-                        end_int = int(end_ord) if end_ord is not None else 0
+                        e2 = dict(entry)
+                        e2["key"] = k
+                        normalized.append(e2)
 
-                        # Choose applicable domain size
-                        if key in ("max_velocity_meters_per_sec", "max_acceleration_meters_per_sec2"):
-                            domain_size = anchor_count
-                        else:
-                            domain_size = rotation_event_count
+            # Compute domain sizes
+            anchor_count = 0  # Translation anchors: TranslationTarget or Waypoint
+            rotation_event_count = 0  # Rotation events: RotationTarget or Waypoint
+            for e in path.path_elements:
+                if isinstance(e, TranslationTarget) or isinstance(e, Waypoint):
+                    anchor_count += 1
+                if isinstance(e, RotationTarget) or isinstance(e, Waypoint):
+                    rotation_event_count += 1
 
-                        # Heuristics:
-                        # - Prefer 0-based if both indices fit 0..domain_size-1
-                        # - Else if both fit 1..domain_size, treat as legacy 1-based
-                        # - Else if either is 0, treat as 0-based
-                        # - Fallback to treating as 1-based
-                        if domain_size > 0 and 0 <= start_int <= domain_size - 1 and 0 <= end_int <= domain_size - 1:
-                            start_int += 1
-                            end_int += 1
-                        elif domain_size > 0 and 1 <= start_int <= domain_size and 1 <= end_int <= domain_size:
-                            # already 1-based
-                            pass
-                        elif start_int == 0 or end_int == 0:
-                            start_int += 1
-                            end_int += 1
-                        else:
-                            # default legacy behavior
-                            pass
-
-                        rc = RangedConstraint(
-                            key=key,
-                            value=float(value),
-                            start_ordinal=start_int,
-                            end_ordinal=end_int,
-                        )
-                        path.ranged_constraints.append(rc)
-                    except Exception:
+            for entry in normalized:
+                key = str(entry.get("key", ""))
+                if key not in (
+                    "max_velocity_meters_per_sec",
+                    "max_acceleration_meters_per_sec2",
+                    "max_velocity_deg_per_sec",
+                    "max_acceleration_deg_per_sec2",
+                ):
+                    continue
+                value = self._opt_float(entry.get("value"))
+                start_ord = entry.get("start_ordinal")
+                end_ord = entry.get("end_ordinal")
+                try:
+                    if value is None:
                         continue
+                    start_int = int(start_ord) if start_ord is not None else 0
+                    end_int = int(end_ord) if end_ord is not None else 0
+
+                    # Choose applicable domain size
+                    if key in ("max_velocity_meters_per_sec", "max_acceleration_meters_per_sec2"):
+                        domain_size = anchor_count
+                    else:
+                        domain_size = rotation_event_count
+
+                    # Heuristics to map stored indices to internal 1-based ordinals
+                    if domain_size > 0 and 0 <= start_int <= domain_size - 1 and 0 <= end_int <= domain_size - 1:
+                        start_int += 1
+                        end_int += 1
+                    elif domain_size > 0 and 1 <= start_int <= domain_size and 1 <= end_int <= domain_size:
+                        pass
+                    elif start_int == 0 or end_int == 0:
+                        start_int += 1
+                        end_int += 1
+                    rc = RangedConstraint(
+                        key=key,
+                        value=float(value),
+                        start_ordinal=start_int,
+                        end_ordinal=end_int,
+                    )
+                    path.ranged_constraints.append(rc)
+                except Exception:
+                    continue
         except Exception:
             pass
         return path
