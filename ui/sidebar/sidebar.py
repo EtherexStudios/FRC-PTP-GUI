@@ -3,7 +3,8 @@
 from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox,
-    QGroupBox, QSizePolicy, QSpacerItem, QListWidgetItem, QPushButton
+    QGroupBox, QSizePolicy, QSpacerItem, QListWidgetItem, QPushButton,
+    QScrollArea
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QSize
 from PySide6.QtGui import QIcon
@@ -96,7 +97,7 @@ class Sidebar(QWidget):
         # Path Constraints section
         self._create_constraints_section(main_layout)
         
-        main_layout.addStretch()  # Pushes all content to the top
+    # No stretch at bottom so last expanding sections (properties / constraints) fill space
         
         # Install event filter for constraint preview handling
         self.installEventFilter(self)
@@ -268,21 +269,64 @@ class Sidebar(QWidget):
         
         constraints_title_layout.addWidget(self.optional_pop)
         parent_layout.addWidget(self.constraints_title_bar)
-        
-        # Constraints form container
+
+        # Constraints form container (wrapped in scroll area)
+        self.constraints_scroll = QScrollArea()
+        self.constraints_scroll.setWidgetResizable(True)
+        self.constraints_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        try:
+            # Keep content anchored to top-left and disallow horizontal panning
+            self.constraints_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        except Exception:
+            pass
+        self.constraints_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.constraints_scroll.setFrameShape(QScrollArea.NoFrame)
+
         self.constraints_form_container = QGroupBox()
-        self.constraints_form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.constraints_form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.constraints_form_container.setStyleSheet("""
-            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; margin-top: 0px; }
             QLabel { color: #f0f0f0; }
+            /* Encompassing container for each ranged constraint type */
+            QWidget[constraintGroupContainer='true'] { background: #242a2e; border: 1px solid #3b3b3b; border-radius: 8px; margin: 4px 0; }
+            QWidget[constraintGroupContainer='true'][constraintGroup='rotation'] { background: #2a242a; }
+            /* Unified rounded boxes for each individual constraint row */
+            QWidget[constraintRow='true'] { background: #2a2a2a; border: 1px solid #3b3b3b; border-radius: 6px; margin: 4px 0; }
+            QWidget[constraintRow='true'][constraintGroup='translation'] { background: #262f36; }
+            QWidget[constraintRow='true'][constraintGroup='rotation'] { background: #30262f; }
+            QLabel[constraintGroup] { background: transparent; }
         """)
+
+        inner_widget = QWidget()
+        inner_layout = QVBoxLayout(inner_widget)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(0)
+        inner_layout.addWidget(self.constraints_form_container)
+        self.constraints_scroll.setWidget(inner_widget)
+        try:
+            # Ensure containers can shrink with the viewport to avoid horizontal clipping
+            inner_widget.setMinimumWidth(0)
+            self.constraints_form_container.setMinimumWidth(0)
+        except Exception:
+            pass
+
         self.constraints_layout = QFormLayout(self.constraints_form_container)
         self.constraints_layout.setLabelAlignment(Qt.AlignRight)
-        self.constraints_layout.setVerticalSpacing(8)
+        self.constraints_layout.setVerticalSpacing(4)
         self.constraints_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        
-        parent_layout.addWidget(self.constraints_form_container)
-        
+
+        # Let this section expand to consume available vertical space while still scrolling internally
+        self.constraints_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        parent_layout.addWidget(self.constraints_scroll)
+
+        # Balance vertical expansion dynamically
+        form_idx = parent_layout.indexOf(self.form_container)
+        constr_idx = parent_layout.indexOf(self.constraints_scroll)
+        if form_idx != -1:
+            parent_layout.setStretch(form_idx, 1)
+        if constr_idx != -1:
+            parent_layout.setStretch(constr_idx, 1)
+
         # Create property controls (includes both core and constraint spinners)
         self.spinners = self.property_editor.create_property_controls(self.core_layout, self.constraints_layout)
         
@@ -295,8 +339,8 @@ class Sidebar(QWidget):
         self.element_manager.elementsReordered.connect(lambda order: self.modelStructureChanged.emit())
         
         # Constraint manager signals
-        self.constraint_manager.constraintAdded.connect(lambda key, val: self.modelChanged.emit())
-        self.constraint_manager.constraintRemoved.connect(lambda key: self.modelChanged.emit())
+        self.constraint_manager.constraintAdded.connect(lambda key, val: (self.modelChanged.emit(), self.refresh_current_selection()))
+        self.constraint_manager.constraintRemoved.connect(lambda key: (self.modelChanged.emit(), self.refresh_current_selection()))
         self.constraint_manager.constraintValueChanged.connect(lambda key, val: self.modelChanged.emit())
         self.constraint_manager.constraintRangeChanged.connect(lambda key, start, end: self.modelChanged.emit())
         
@@ -621,6 +665,15 @@ class Sidebar(QWidget):
                     display = _menu_label_for_key(key)
                     optional_display_items.append(display)
                     self.property_editor.optional_display_to_key[display] = key
+
+                # For ranged-capable constraints, always provide an option to add another instance
+                if key in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2',
+                           'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'):
+                    add_more_label = _menu_label_for_key(key) + ' (+)'
+                    # Avoid duplicate entry if already added in this pass
+                    if add_more_label not in optional_display_items:
+                        optional_display_items.append(add_more_label)
+                        self.property_editor.optional_display_to_key[add_more_label] = key
                     
         # Return optional items list
         return optional_display_items
@@ -848,6 +901,9 @@ class Sidebar(QWidget):
             
         # Translate display name back to actual key if needed
         real_key = self.property_editor.optional_display_to_key.get(key, key)
+        # If user selected a "+" variant manually entered, strip it
+        if real_key.endswith(' (+)') and real_key not in self.property_editor.optional_display_to_key:
+            real_key = real_key.replace(' (+)', '')
         
         label_text = SPINNER_METADATA.get(real_key, {}).get('label', real_key).replace('<br/>', ' ')
         
@@ -855,7 +911,7 @@ class Sidebar(QWidget):
             self.aboutToChange.emit(f"Add {label_text}")
         except Exception:
             pass
-            
+        
         # Add constraint via manager
         self.constraint_manager.add_constraint(real_key)
         

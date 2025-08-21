@@ -17,7 +17,7 @@ SPINNER_METADATA = {
     'rotation_degrees': {
         'label': 'Rotation (deg)', 
         'step': 1.0, 
-        'range': (-180.0, 180.0), 
+        'range': (-99999.0, 99999.0), 
         'removable': False, 
         'section': 'core'
     },

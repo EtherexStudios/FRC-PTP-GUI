@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QVBoxLayout,
-    QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt
+from ui.sidebar.widgets.no_wheel_spinbox import NoWheelDoubleSpinBox
 
 
 class ConfigDialog(QDialog):
@@ -23,7 +23,7 @@ class ConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Edit Config")
         self.setModal(True)
-        self._spins: Dict[str, QDoubleSpinBox] = {}
+        self._spins: Dict[str, NoWheelDoubleSpinBox] = {}
         cfg = existing_config or {}
         self._on_change = on_change
 
@@ -32,7 +32,7 @@ class ConfigDialog(QDialog):
         root.addLayout(form)
 
         def add_spin(key: str, label: str, default: float, rng: tuple[float, float], step: float = 0.01):
-            spin = QDoubleSpinBox(self)
+            spin = NoWheelDoubleSpinBox(self)
             spin.setDecimals(4)
             spin.setSingleStep(step)
             spin.setRange(rng[0], rng[1])
