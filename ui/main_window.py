@@ -691,7 +691,9 @@ class MainWindow(QMainWindow):
                 old_state=old_path,
                 new_state=new_path,
                 description=description,
-                on_change_callback=self._refresh_after_undo_redo
+                on_change_callback=self._refresh_after_undo_redo,
+                # Micro-edits from sidebar already updated the live UI, so skip first heavy refresh
+                suppress_first_callback=True if description.startswith("Edit ") or description.startswith("Remove ") or description.startswith("Add ") or description.startswith("Edit Range") else False
             )
             self.undo_manager.execute_command(command)
         

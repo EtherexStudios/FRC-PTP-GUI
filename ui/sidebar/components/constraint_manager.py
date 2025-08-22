@@ -643,7 +643,43 @@ class ConstraintManager(QObject):
                         except Exception:
                             pass
                         try:
-                            self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc is not target_rc]
+                            rc_list = (getattr(self.path, 'ranged_constraints', []) or [])
+                            removed = False
+                            # First try strict identity removal
+                            new_list = []
+                            for rc in rc_list:
+                                if not removed and rc is target_rc:
+                                    removed = True
+                                    continue
+                                new_list.append(rc)
+                            if not removed:
+                                # Fall back to signature-based removal (handles deep-copied model after undo snapshot)
+                                try:
+                                    t_key = getattr(target_rc, 'key', None)
+                                    t_l = int(getattr(target_rc, 'start_ordinal', 1))
+                                    t_h = int(getattr(target_rc, 'end_ordinal', 1))
+                                    t_val = getattr(target_rc, 'value', None)
+                                except Exception:
+                                    t_key, t_l, t_h, t_val = None, None, None, None
+                                new_list2 = []
+                                matched_once = False
+                                for rc in rc_list:
+                                    try:
+                                        if (not matched_once and
+                                            getattr(rc, 'key', None) == t_key and
+                                            int(getattr(rc, 'start_ordinal', -1)) == int(t_l) and
+                                            int(getattr(rc, 'end_ordinal', -1)) == int(t_h) and
+                                            getattr(rc, 'value', None) == t_val):
+                                            matched_once = True
+                                            continue
+                                    except Exception:
+                                        pass
+                                    new_list2.append(rc)
+                                if matched_once:
+                                    new_list = new_list2
+                                    removed = True
+                            if removed:
+                                self.path.ranged_constraints = new_list
                         except Exception:
                             pass
                         # If no instances left for key, emit full removal and return

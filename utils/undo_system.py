@@ -43,13 +43,17 @@ class PathCommand(Command):
         old_state: 'Path',
         new_state: 'Path',
         description: str,
-        on_change_callback: Optional[Callable[[], None]] = None
+        on_change_callback: Optional[Callable[[], None]] = None,
+        suppress_first_callback: bool = False
     ):
         self.path_ref = path_ref
         self.old_state = copy.deepcopy(old_state)
         self.new_state = copy.deepcopy(new_state)
         self.description = description
         self.on_change_callback = on_change_callback
+        # Avoid triggering heavy refresh immediately when the user just made the change
+        self._suppress_first_callback = bool(suppress_first_callback)
+        self._has_executed_once = False
     
     def execute(self) -> None:
         """Apply the new state to the path."""
@@ -60,8 +64,19 @@ class PathCommand(Command):
             self.path_ref.ranged_constraints = copy.deepcopy(getattr(self.new_state, 'ranged_constraints', []))
         except Exception:
             pass
+        # Trigger callback except for the very first execute when suppression requested
         if self.on_change_callback:
-            self.on_change_callback()
+            if not self._has_executed_once or not self._suppress_first_callback:
+                # If suppression requested and this is the first execute, skip
+                if self._suppress_first_callback and not self._has_executed_once:
+                    self._has_executed_once = True
+                else:
+                    self.on_change_callback()
+                    self._has_executed_once = True
+            else:
+                # Already executed once; normal behavior
+                self.on_change_callback()
+                self._has_executed_once = True
     
     def undo(self) -> None:
         """Revert to the old state."""
