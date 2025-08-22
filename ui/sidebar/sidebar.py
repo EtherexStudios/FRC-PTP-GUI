@@ -187,19 +187,28 @@ class Sidebar(QWidget):
         self.form_container.setStyleSheet("""
             QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
             QLabel { color: #f0f0f0; }
+            /* Unified rounded boxes for each individual core property row to match constraints */
+            QWidget[constraintRow='true'] { background: #2a2a2a; border: 1px solid #3b3b3b; border-radius: 6px; margin: 4px 0; }
         """)
         
         # Main layout for the group box
         group_box_spinner_layout = QVBoxLayout(self.form_container)
-        group_box_spinner_layout.setContentsMargins(6, 6, 6, 6)
-        group_box_spinner_layout.setSpacing(8)
+        # Match constraints: reduce outer left/right padding; tighter vertical spacing
+        group_box_spinner_layout.setContentsMargins(0, 6, 0, 6)
+        group_box_spinner_layout.setSpacing(4)
 
         # Type selector and properties form
         self.core_page = QWidget()
         self.core_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.core_layout = QFormLayout(self.core_page)
         self.core_layout.setLabelAlignment(Qt.AlignRight)
-        self.core_layout.setVerticalSpacing(8)
+        # Reduce row spacing to match constraints
+        self.core_layout.setVerticalSpacing(4)
+        # Remove extra content margins so row widgets align with container padding
+        try:
+            self.core_layout.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
         self.core_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         # Type selector
@@ -214,14 +223,33 @@ class Sidebar(QWidget):
 
         self.optional_box_layout.addWidget(self.type_combo)
 
-        # Put the type selector above the properties
+        # Put the type selector above the properties (styled like constraint rows)
         header_row = QWidget()
+        header_row.setProperty('constraintRow', 'true')
         header_row_layout = QHBoxLayout(header_row)
-        header_row_layout.setContentsMargins(0, 0, 0, 0)
+        # Reduce top/bottom padding inside the combobox bordered box
+        header_row_layout.setContentsMargins(8, 4, 8, 4)
         header_row_layout.setSpacing(6)
+        try:
+            # Keep natural height; only constrain width/alignment
+            header_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        except Exception:
+            pass
         header_row_layout.addWidget(self.type_label)
-        header_row_layout.addWidget(self.optional_container, 1)
-        group_box_spinner_layout.addWidget(header_row)
+        header_row_layout.addStretch()
+        try:
+            self.optional_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        header_row_layout.addWidget(self.optional_container)
+        # Wrap header to enforce same left/right padding as other rows
+        header_wrap = QWidget()
+        header_wrap_layout = QHBoxLayout(header_wrap)
+        header_wrap_layout.setContentsMargins(8, 0, 8, 0)
+        header_wrap_layout.setSpacing(0)
+        header_wrap_layout.addWidget(header_row)
+        group_box_spinner_layout.addWidget(header_wrap)
+        self.core_page.setContentsMargins(8, 0, 8, 0)
         group_box_spinner_layout.addWidget(self.core_page)
         
         # Stretch to consume remaining vertical space

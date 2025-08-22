@@ -100,11 +100,63 @@ class PropertyEditor(QObject):
             # Section placement & grouping
             section = data.get('section', 'core')
             if section == 'core':
-                # Fixed label width for core rows
-                label.setMinimumWidth(CONSTRAINT_LABEL_WIDTH)
-                label.setMaximumWidth(CONSTRAINT_LABEL_WIDTH)
-                label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-                form_layout.addRow(label, spin_row)
+                # Use combined row styling similar to non-ranged constraints
+                try:
+                    from PySide6.QtWidgets import QHBoxLayout as _QHBox
+                    combined_row = QWidget()
+                    combined_layout = _QHBox(combined_row)
+                    # Add more bottom padding so text doesn't sit on the border
+                    combined_layout.setContentsMargins(8, 4, 8, 4)
+                    combined_layout.setSpacing(6)
+                    try:
+                        # Increase row height to prevent label text clipping with padding
+                        combined_row.setMinimumHeight(40)
+                        combined_row.setMaximumHeight(44)
+                        combined_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                    except Exception:
+                        pass
+                    label.setParent(combined_row)
+                    try:
+                        label.setMinimumWidth(80)
+                        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                        # Let layout margins control spacing to avoid internal clipping
+                        label.setContentsMargins(0, 0, 0, 0)
+                    except Exception:
+                        pass
+                    combined_layout.addWidget(label)
+                    # Stretch the label cell so the spinner hugs the right edge
+                    try:
+                        combined_layout.setStretch(0, 1)
+                    except Exception:
+                        pass
+                    # Match spinner size to path constraints (non‑ranged) and pin to right
+                    from PySide6.QtWidgets import QCheckBox as _QCheckBox
+                    if not isinstance(control, _QCheckBox):
+                        try:
+                            control.setMinimumWidth(80)
+                            control.setMaximumWidth(80)
+                            control.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                        except Exception:
+                            pass
+                    else:
+                        # For checkbox, add a small right inset so it's not touching the border
+                        try:
+                            l, t, r, b = combined_layout.getContentsMargins()
+                            combined_layout.setContentsMargins(l, t, max(r, 12), b)
+                        except Exception:
+                            pass
+                    combined_layout.addWidget(control)
+                    # Core properties are not removable; omit button to keep spinner flush right
+                    # Mark for unified row styling
+                    combined_row.setProperty('constraintRow', 'true')
+                    form_layout.addRow(combined_row)
+                    spin_row = combined_row
+                except Exception:
+                    # Fallback to traditional two-column layout
+                    label.setMinimumWidth(CONSTRAINT_LABEL_WIDTH)
+                    label.setMaximumWidth(CONSTRAINT_LABEL_WIDTH)
+                    label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                    form_layout.addRow(label, spin_row)
             elif section == 'constraints':
                 if constraint_row_index < 3:
                     group_name = 'nonranged'
