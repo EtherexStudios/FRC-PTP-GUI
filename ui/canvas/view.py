@@ -230,6 +230,8 @@ class CanvasView(QGraphicsView):
                 try:
                     self.fitInView(rect, Qt.KeepAspectRatio)
                     if abs(self._zoom_factor-1.0)>1e-6: self.scale(self._zoom_factor, self._zoom_factor)
+                    # After any fit/scale, reposition transport overlay to viewport corner
+                    QTimer.singleShot(0, self.transport.position)
                 except Exception: pass
         finally:
             self._is_fitting=False
@@ -635,6 +637,9 @@ class CanvasView(QGraphicsView):
                 factor=self._max_zoom/self._zoom_factor; self._zoom_factor=self._max_zoom
             else: self._zoom_factor=new_zoom
             self.scale(factor,factor); event.accept()
+            # Keep transport overlay anchored after zooming
+            try: self.transport.position()
+            except Exception: pass
         except Exception:
             try: super().wheelEvent(event)
             except Exception: pass
@@ -657,6 +662,18 @@ class CanvasView(QGraphicsView):
                 hbar=self.horizontalScrollBar(); vbar=self.verticalScrollBar(); hbar.setValue(hbar.value()-delta.x()); vbar.setValue(vbar.value()-delta.y()); self._pan_start=event.pos(); event.accept(); return
         except Exception: pass
         super().mouseMoveEvent(event)
+
+        # Reposition overlay when the view scrolls due to any movement
+        try: self.transport.position()
+        except Exception: pass
+
+    def scrollContentsBy(self, dx: int, dy: int):
+        # Called for any programmatic or inertial scroll; keep overlay anchored
+        try:
+            super().scrollContentsBy(dx, dy)
+        finally:
+            try: self.transport.position()
+            except Exception: pass
 
     def mouseReleaseEvent(self,event):
         try:
