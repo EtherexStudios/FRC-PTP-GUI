@@ -20,3 +20,6 @@ venv/
 
 # Cursor/Editor artifacts
 *.log
+
+# Project examples
+example_project/
