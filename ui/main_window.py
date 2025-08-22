@@ -325,7 +325,7 @@ class MainWindow(QMainWindow):
         path_menu.addSeparator()
         
         # Delete Path action (opens dialog)
-        self.action_delete_path = QAction("Delete Paths...", self)
+        self.action_delete_path = QAction("Delete Paths…", self)
         self.action_delete_path.triggered.connect(self._show_delete_path_dialog)
         path_menu.addAction(self.action_delete_path)
         
@@ -464,67 +464,111 @@ class MainWindow(QMainWindow):
         # Create a custom dialog
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, QScrollArea, QWidget
         from PySide6.QtCore import Qt
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Delete Paths")
         dialog.setModal(True)
-        dialog.resize(400, 300)
-        
+        dialog.resize(420, 340)
+
+        # Apply dark theme styling consistent with the app
+        try:
+            dialog.setStyleSheet(
+                """
+                QDialog { background-color: #242424; }
+                QLabel { color: #f0f0f0; }
+                QCheckBox { color: #e0e0e0; spacing: 8px; }
+                QScrollArea { background: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
+                QWidget#pathRow { background: #2a2a2a; border: 1px solid #3b3b3b; border-radius: 6px; }
+                QWidget#pathRow[current="true"] { background: #332b2b; border-color: #7a3b3b; }
+                QPushButton { background-color: #2f2f2f; color: #f0f0f0; border: 1px solid #4a4a4a; border-radius: 4px; padding: 4px 10px; }
+                QPushButton:hover { background-color: #3a3a3a; }
+                QPushButton:pressed { background-color: #454545; }
+                QPushButton#deleteBtn { background-color: #d32f2f; color: white; border: none; }
+                QPushButton#deleteBtn:hover { background-color: #b71c1c; }
+                QPushButton#accentBtn { background-color: #4caf50; color: white; border: none; }
+                QPushButton#accentBtn:hover { background-color: #3d9140; }
+                QScrollBar:vertical { background: #242424; width: 12px; margin: 4px 0 4px 0; }
+                QScrollBar::handle:vertical { background: #3b3b3b; border-radius: 6px; min-height: 20px; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+                """
+            )
+        except Exception:
+            pass
+
         layout = QVBoxLayout(dialog)
-        
+        try:
+            layout.setContentsMargins(10, 10, 10, 10)
+            layout.setSpacing(8)
+        except Exception:
+            pass
+
         # Header
         header_label = QLabel("Select paths to delete:")
         header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(header_label)
-        
+
         # Scrollable area for checkboxes
         scroll_area = QScrollArea()
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
-        
-        # Create checkboxes for each path
+        try:
+            scroll_layout.setContentsMargins(6, 6, 6, 6)
+            scroll_layout.setSpacing(4)
+        except Exception:
+            pass
+
+        # Create styled rows with checkboxes for each path
         checkboxes = {}
         for fname in files:
-            cb = QCheckBox(fname)
-            # Mark current path with an indicator
+            row = QWidget()
+            row.setObjectName("pathRow")
             if fname == self.project_manager.current_path_file:
-                cb.setText(f"✓ {fname} (Current)")
-                cb.setStyleSheet("color: #d32f2f; font-weight: bold;")
+                row.setProperty("current", "true")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 4, 8, 4)
+            row_layout.setSpacing(6)
+
+            cb = QCheckBox(fname)
+            if fname == self.project_manager.current_path_file:
+                cb.setText(f"{fname} (Current)")
+                cb.setToolTip("This is the currently open path")
+
             checkboxes[fname] = cb
-            scroll_layout.addWidget(cb)
-        
+            row_layout.addWidget(cb)
+            scroll_layout.addWidget(row)
+
         scroll_widget.setLayout(scroll_layout)
         scroll_area.setWidget(scroll_widget)
         scroll_area.setWidgetResizable(True)
         layout.addWidget(scroll_area)
-        
+
         # Button layout
         button_layout = QHBoxLayout()
-        
+
         # Select All/None buttons
         select_all_btn = QPushButton("Select All")
         select_all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes.values()])
-        
+
         select_none_btn = QPushButton("Select None")
         select_none_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in checkboxes.values()])
-        
+
         button_layout.addWidget(select_all_btn)
         button_layout.addWidget(select_none_btn)
         button_layout.addStretch()
-        
+
         # Delete and Cancel buttons
         delete_btn = QPushButton("Delete Selected")
-        delete_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
+        delete_btn.setObjectName("deleteBtn")
         delete_btn.clicked.connect(lambda: self._delete_paths_from_dialog(checkboxes, dialog))
-        
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
-        
+
         button_layout.addWidget(delete_btn)
         button_layout.addWidget(cancel_btn)
-        
+
         layout.addLayout(button_layout)
-        
+
         # Show dialog
         dialog.exec()
 
