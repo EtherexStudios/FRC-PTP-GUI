@@ -1,6 +1,7 @@
 """Constraint manager component for handling path constraints and range sliders."""
 
 from typing import Dict, Optional, Tuple, Any, List
+import math
 from PySide6.QtCore import QObject, Signal, QTimer, Qt, QEvent
 from PySide6.QtWidgets import QWidget, QLabel, QDoubleSpinBox, QVBoxLayout, QFormLayout, QPushButton, QHBoxLayout, QSizePolicy
 from PySide6.QtGui import QCursor, QMouseEvent, QIcon
@@ -84,60 +85,86 @@ class ConstraintManager(QObject):
             except Exception:
                 pass
         else:
-            # Append a new ranged constraint spanning the full domain
+            # Append a new ranged constraint only if there is a truly free unit
             try:
                 _domain, count = self.get_domain_info_for_key(key)
                 total = int(count) if int(count) > 0 else 1
-                # Enforce maximum number of instances equal to total available unit segments
                 try:
                     existing_for_key = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
                 except Exception:
                     existing_for_key = []
-                if len(existing_for_key) >= total:
-                    return False
                 if not hasattr(self.path, 'ranged_constraints') or self.path.ranged_constraints is None:
                     self.path.ranged_constraints = []
-                # Create with placeholder ordinals; we'll assign a free slot below
-                new_rc = RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total)
-                # Find first free unit segment [pos, pos+1) that doesn't overlap others
-                existing = existing_for_key
-                intervals = []  # slider-space intervals [low, high)
-                for rc in existing:
+                # Compute occupied unit ordinals from existing ranges (inclusive model ordinals)
+                occupied_units = set()
+                for rc in existing_for_key:
                     try:
                         l = int(getattr(rc, 'start_ordinal', 1))
-                        h = int(getattr(rc, 'end_ordinal', total)) + 1
-                        intervals.append((max(1, min(l, total)), max(2, min(h, total + 1))))
+                        h = int(getattr(rc, 'end_ordinal', total))
+                        l = max(1, min(l, total))
+                        h = max(1, min(h, total))
+                        if h < l:
+                            h = l
+                        for u in range(int(l), int(h) + 1):
+                            occupied_units.add(int(u))
                     except Exception:
                         continue
-                # Scan for free position
+                # If domain fully occupied, attempt to split the largest existing range to make room
+                if len(occupied_units) >= total:
+                    # Identify the largest existing contiguous range
+                    largest_rc = None
+                    largest_len = 0
+                    largest_bounds = (1, 1)
+                    for rc in existing_for_key:
+                        try:
+                            l0 = int(getattr(rc, 'start_ordinal', 1))
+                            h0 = int(getattr(rc, 'end_ordinal', total))
+                            l0 = max(1, min(l0, total))
+                            h0 = max(1, min(h0, total))
+                            if h0 < l0:
+                                h0 = l0
+                            cur_len = int(h0 - l0 + 1)
+                            if cur_len > largest_len:
+                                largest_len = cur_len
+                                largest_rc = rc
+                                largest_bounds = (int(l0), int(h0))
+                        except Exception:
+                            continue
+                    # Only proceed if we can actually split a range (length >= 2)
+                    if largest_rc is None or largest_len < 2:
+                        return False
+                    # Split into two halves; keep the larger half with the existing rc to minimize impact
+                    left_len = int(math.ceil(largest_len / 2.0))
+                    right_len = int(largest_len - left_len)
+                    l_start, h_end = largest_bounds
+                    left_end = int(l_start + left_len - 1)
+                    # Adjust existing largest to the left half
+                    try:
+                        largest_rc.start_ordinal = int(l_start)
+                        largest_rc.end_ordinal = int(left_end)
+                    except Exception:
+                        pass
+                    # Place the new constraint in the right half
+                    new_rc = RangedConstraint(key=key, value=value, start_ordinal=int(left_end + 1), end_ordinal=int(h_end))
+                    self.path.ranged_constraints.append(new_rc)
+                    # Clear flat value storage for ranged keys and emit
+                    try:
+                        setattr(self.path.constraints, key, None)
+                    except Exception:
+                        pass
+                    self.constraintAdded.emit(key, value)
+                    return True
+                # Create with placeholder ordinals; we'll assign a free slot below
+                new_rc = RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total)
+                # Choose the first free unit (minimal touch of existing ranges)
                 chosen = None
                 for pos in range(1, total + 1):
-                    low = pos; high = pos + 1
-                    overlap = False
-                    for (bl, bh) in intervals:
-                        if low < bh and bl < high:
-                            overlap = True; break
-                    if not overlap:
-                        chosen = pos; break
+                    if pos not in occupied_units:
+                        chosen = pos
+                        break
                 if chosen is None:
-                    # No immediate free unit found; fall back to placing at the end abutting last interval
-                    # Sort intervals and pick the largest gap, if any
-                    intervals_sorted = sorted(intervals)
-                    best_gap = None
-                    best_pos = None
-                    last = 1
-                    for (bl, bh) in intervals_sorted:
-                        if bl > last:
-                            gap = bl - last
-                            if gap >= 1:
-                                best_gap = gap; best_pos = last; break
-                        last = max(last, bh)
-                    if best_pos is not None:
-                        chosen = best_pos
-                    else:
-                        # As a final resort, clamp to the last notch
-                        chosen = max(1, total)
-                # Assign minimal non-overlapping width at chosen position
+                    # Safety: no free unit found; do not add overlapping range
+                    return False
                 new_rc.start_ordinal = int(chosen)
                 new_rc.end_ordinal = int(chosen)
                 self.path.ranged_constraints.append(new_rc)
@@ -497,24 +524,19 @@ class ConstraintManager(QObject):
         _remove_existing_sliders_from_row(spin_row)
 
         # Build UI for each instance
-        # Before building, ensure sliders will be non-overlapping by adjusting any colliding instances
+        # Sanitize any invalid ordinals without repositioning existing ranges
         def _normalize_instances(instances: List[Any]):
             try:
-                used = set()
                 for rc in instances:
                     l = int(getattr(rc, 'start_ordinal', 1))
                     h = int(getattr(rc, 'end_ordinal', total))
-                    # reduce to minimal width unit if invalid
-                    if h < l: h = l
-                    # find a free position if [l,h] collides with existing
-                    pos = l
-                    while pos <= total and (pos in used):
-                        pos += 1
-                    if pos > total:
-                        pos = total
-                    setattr(rc, 'start_ordinal', int(pos))
-                    setattr(rc, 'end_ordinal', int(pos))
-                    used.add(int(pos))
+                    # Clamp to bounds and ensure non-empty [l, h]
+                    l = max(1, min(l, total))
+                    h = max(1, min(h, total))
+                    if h < l:
+                        h = l
+                    setattr(rc, 'start_ordinal', int(l))
+                    setattr(rc, 'end_ordinal', int(h))
             except Exception:
                 pass
 
@@ -657,6 +679,30 @@ class ConstraintManager(QObject):
                 return lambda v: self._update_single_ranged_constraint_value(key, target_rc, float(v))
             spinbox.valueChanged.connect(_make_value_handler(rc_obj))
 
+            # While interacting with the spinbox, also show the corresponding range preview
+            try:
+                spinbox.valueChanged.connect(lambda _v, _sld=sld, _key=key, _total=total: (
+                    setattr(self, '_active_preview_key', _key),
+                    (lambda l_h: self.constraintRangePreviewRequested.emit(
+                        _key,
+                        max(1, min(int(l_h[0]), int(_total))),
+                        max(1, min(int(l_h[1] - 1), int(_total)))
+                    ))(_sld.values())
+                ))
+            except Exception:
+                pass
+            try:
+                spinbox.editingFinished.connect(lambda _sld=sld, _key=key, _total=total: (
+                    setattr(self, '_active_preview_key', _key),
+                    (lambda l_h: self.constraintRangePreviewRequested.emit(
+                        _key,
+                        max(1, min(int(l_h[0]), int(_total))),
+                        max(1, min(int(l_h[1] - 1), int(_total)))
+                    ))(_sld.values())
+                ))
+            except Exception:
+                pass
+
             # Create and add slider on the same row as the spinbox
             sld = _make_slider_for_instance(idx, rc_obj)
             try:
@@ -712,19 +758,81 @@ class ConstraintManager(QObject):
                 vbox.addWidget(sld)
             sliders.append(sld)
 
+            # Link focus on this spinbox to preview its slider range on the canvas
+            try:
+                orig_focus_in = spinbox.focusInEvent
+            except Exception:
+                orig_focus_in = None
+            def _focus_in(ev, _sld=sld, _key=key, _total=total, _spin=spinbox, _orig=orig_focus_in):
+                try:
+                    l, h = _sld.values()
+                    # Map slider handles (1..total+1) -> model ordinals (1..total)
+                    start1 = max(1, min(int(l), int(_total)))
+                    end1 = max(1, min(int(h - 1), int(_total)))
+                    self._active_preview_key = _key
+                    self.constraintRangePreviewRequested.emit(_key, start1, end1)
+                except Exception:
+                    pass
+                try:
+                    if _orig is not None:
+                        _orig(ev)
+                except Exception:
+                    try:
+                        from PySide6.QtWidgets import QDoubleSpinBox
+                        QDoubleSpinBox.focusInEvent(_spin, ev)
+                    except Exception:
+                        pass
+            try:
+                spinbox.focusInEvent = _focus_in
+            except Exception:
+                pass
+
+            # Also emit preview on mouse press/double-click within the spinbox (or its child editor)
+            try:
+                from PySide6.QtCore import QObject, QEvent
+                class SpinboxPreviewFilter(QObject):
+                    def __init__(self, callback):
+                        super().__init__()
+                        self._cb = callback
+                    def eventFilter(self, obj, event):
+                        try:
+                            et = event.type()
+                            if et in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
+                                self._cb()
+                                return False
+                        except Exception:
+                            pass
+                        return False
+                def _emit_preview_from_spin():
+                    try:
+                        l, h = sld.values()
+                        start1 = max(1, min(int(l), int(total)))
+                        end1 = max(1, min(int(h - 1), int(total)))
+                        self._active_preview_key = key
+                        self.constraintRangePreviewRequested.emit(key, start1, end1)
+                    except Exception:
+                        pass
+                filt = SpinboxPreviewFilter(_emit_preview_from_spin)
+                spinbox.installEventFilter(filt)
+                try:
+                    editor = spinbox.findChild(QWidget)
+                    if editor is not None:
+                        editor.installEventFilter(filt)
+                except Exception:
+                    pass
+                if not hasattr(self, '_spinbox_preview_filters'):
+                    self._spinbox_preview_filters = {}
+                try:
+                    self._spinbox_preview_filters.setdefault(key, []).append(filt)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         try:
             field_container.updateGeometry()
         except Exception:
             pass
-
-            # Spinner focus preview linking
-            orig_focus_in = spinbox.focusInEvent
-            def _focus_in(ev, _sld=sld):
-                l, h = _sld.values()
-                self._active_preview_key = key
-                self.constraintRangePreviewRequested.emit(key, int(l), int(h))
-                orig_focus_in(ev)
-            spinbox.focusInEvent = _focus_in
 
         # Make label clickable to show preview of first instance
         label_widget.setStyleSheet(label_widget.styleSheet() + " QLabel:hover { text-decoration: underline; }")
@@ -744,8 +852,11 @@ class ConstraintManager(QObject):
         def _show_first_preview():
             if sliders:
                 l, h = sliders[0].values()
+                # Map slider handles to model ordinals
+                start1 = max(1, min(int(l), int(total)))
+                end1 = max(1, min(int(h - 1), int(total)))
                 self._active_preview_key = key
-                self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                self.constraintRangePreviewRequested.emit(key, start1, end1)
 
         label_filter = LabelClickFilter(_show_first_preview)
         label_widget.installEventFilter(label_filter)
@@ -801,8 +912,13 @@ class ConstraintManager(QObject):
             if key in self._range_sliders and self._range_sliders[key]:
                 s = self._range_sliders[key][0]
                 l, h = s.values()
+                # Map slider handles (1..total+1) -> model ordinals (1..total)
+                _domain, count = self.get_domain_info_for_key(key)
+                total = int(count) if int(count) > 0 else 1
+                start1 = max(1, min(int(l), total))
+                end1 = max(1, min(int(h - 1), total))
                 self._active_preview_key = key
-                self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                self.constraintRangePreviewRequested.emit(key, int(start1), int(end1))
         except Exception:
             pass
             
@@ -812,7 +928,12 @@ class ConstraintManager(QObject):
             if self._active_preview_key is not None and self._active_preview_key in self._range_sliders and self._range_sliders[self._active_preview_key]:
                 s = self._range_sliders[self._active_preview_key][0]
                 l, h = s.values()
-                self.constraintRangePreviewRequested.emit(self._active_preview_key, int(l), int(h))
+                # Map slider handles to model ordinals
+                _domain, count = self.get_domain_info_for_key(self._active_preview_key)
+                total = int(count) if int(count) > 0 else 1
+                start1 = max(1, min(int(l), total))
+                end1 = max(1, min(int(h - 1), total))
+                self.constraintRangePreviewRequested.emit(self._active_preview_key, int(start1), int(end1))
         except Exception:
             pass
             
@@ -852,6 +973,20 @@ class ConstraintManager(QObject):
                         return True
                 except Exception:
                     pass
+            
+            # Check spinboxes and their child widgets
+            try:
+                for _key, spin_list in self._range_spinboxes.items():
+                    for spin in spin_list or []:
+                        try:
+                            if spin is widget:
+                                return True
+                            if hasattr(spin, 'isAncestorOf') and spin.isAncestorOf(widget):
+                                return True
+                        except Exception:
+                            continue
+            except Exception:
+                pass
                     
         except Exception:
             return False
@@ -870,7 +1005,26 @@ class ConstraintManager(QObject):
             _domain, count = self.get_domain_info_for_key(key)
             total = int(count) if int(count) > 0 else 1
             existing = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
-            return len(existing) < total
+            # Compute occupied units and whether a split is feasible
+            occupied_units = set()
+            largest_len = 0
+            for rc in existing:
+                try:
+                    l = int(getattr(rc, 'start_ordinal', 1))
+                    h = int(getattr(rc, 'end_ordinal', total))
+                    l = max(1, min(l, total))
+                    h = max(1, min(h, total))
+                    if h < l:
+                        h = l
+                    for u in range(int(l), int(h) + 1):
+                        occupied_units.add(int(u))
+                    largest_len = max(largest_len, int(h - l + 1))
+                except Exception:
+                    continue
+            if len(occupied_units) < total:
+                return True
+            # If fully occupied but there exists a range of length >= 2, we can split
+            return largest_len >= 2
         except Exception:
             return False
 

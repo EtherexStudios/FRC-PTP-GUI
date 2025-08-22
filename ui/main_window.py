@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):
         try:
-            if event.type() == QEvent.MouseButtonPress:
+            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
                 # If click is not within a range-related control in the sidebar, clear overlay
                 target_widget = obj if isinstance(obj, QWidget) else None
                 # Walk up parent chain to see if any ancestor is range-related
@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
                                 pl = self.sidebar.points_list
                                 curr = widget
                                 steps = 0
-                                while curr is not None and steps < 12:
+                                while curr is not None and steps < 48:
                                     if curr is pl:
                                         return False
                                     curr = curr.parent() if hasattr(curr, 'parent') else None
@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
                         if hasattr(self.sidebar, 'is_widget_range_related') and callable(self.sidebar.is_widget_range_related):
                             curr = widget
                             steps = 0
-                            while curr is not None and steps < 12:
+                            while curr is not None and steps < 48:
                                 if self.sidebar.is_widget_range_related(curr):
                                     return True
                                 curr = curr.parent() if hasattr(curr, 'parent') else None

@@ -991,8 +991,8 @@ class Sidebar(QWidget):
         try:
             et = event.type()
             
-            # Handle clicks to manage constraint preview
-            if et == QEvent.MouseButtonPress:
+            # Handle clicks/double-clicks to manage constraint preview
+            if et in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
                 # If click is on the sidebar itself, determine the child under the cursor
                 target_widget = obj
                 try:
