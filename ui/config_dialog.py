@@ -8,6 +8,10 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QVBoxLayout,
+    QGroupBox,
+    QWidget,
+    QHBoxLayout,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt
 from ui.sidebar.widgets.no_wheel_spinbox import NoWheelDoubleSpinBox
@@ -27,17 +31,118 @@ class ConfigDialog(QDialog):
         cfg = existing_config or {}
         self._on_change = on_change
 
+        # Apply dark dialog background to match the app
+        try:
+            self.setObjectName("configDialog")
+            self.setStyleSheet(
+                """
+                QDialog#configDialog { background-color: #151515; }
+                QLabel { color: #f0f0f0; }
+                """
+            )
+        except Exception:
+            pass
+
         root = QVBoxLayout(self)
-        form = QFormLayout()
-        root.addLayout(form)
+        try:
+            root.setContentsMargins(8, 8, 8, 8)
+            root.setSpacing(8)
+        except Exception:
+            pass
+
+        # Title bar styled like other sections in the app
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("configTitleBar")
+        try:
+            self.title_bar.setStyleSheet(
+                """
+                QWidget#configTitleBar {
+                    background-color: #2a2a2a;
+                    border: 1px solid #5a5a5a;
+                    border-radius: 6px;
+                }
+                """
+            )
+        except Exception:
+            pass
+        title_layout = QHBoxLayout(self.title_bar)
+        try:
+            title_layout.setContentsMargins(10, 0, 10, 0)
+            title_layout.setSpacing(0)
+        except Exception:
+            pass
+        title_label = QLabel("Configuration")
+        try:
+            title_label.setStyleSheet(
+                """
+                font-size: 14px;
+                font-weight: bold;
+                color: #eeeeee;
+                background: transparent;
+                border: none;
+                padding: 6px 0;
+                """
+            )
+        except Exception:
+            pass
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        root.addWidget(self.title_bar)
+
+        # Group box container matching sidebar look
+        self.form_container = QGroupBox()
+        try:
+            self.form_container.setStyleSheet(
+                """
+                QGroupBox { background-color: #202020; border: 1px solid #444444; border-radius: 6px; }
+                QLabel { color: #f0f0f0; }
+                QWidget[constraintRow='true'] { background: #2d2d2d; border: 1px solid #454545; border-radius: 6px; margin: 4px 0; }
+                """
+            )
+        except Exception:
+            pass
+        group_layout = QVBoxLayout(self.form_container)
+        try:
+            group_layout.setContentsMargins(8, 6, 8, 6)
+            group_layout.setSpacing(4)
+        except Exception:
+            pass
+        root.addWidget(self.form_container)
 
         def add_spin(key: str, label: str, default: float, rng: tuple[float, float], step: float = 0.01):
+            # Row wrapper styled like constraint/property rows elsewhere
+            row = QWidget()
+            row.setProperty('constraintRow', 'true')
+            row_layout = QHBoxLayout(row)
+            try:
+                row_layout.setContentsMargins(8, 6, 8, 6)
+                row_layout.setSpacing(8)
+            except Exception:
+                pass
+
+            lbl = QLabel(label)
+            try:
+                lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                lbl.setMinimumWidth(200)
+            except Exception:
+                pass
+
             spin = NoWheelDoubleSpinBox(self)
             spin.setDecimals(4)
             spin.setSingleStep(step)
             spin.setRange(rng[0], rng[1])
             spin.setValue(float(cfg.get(key, default)))
-            form.addRow(QLabel(label), spin)
+            try:
+                spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                spin.setMinimumWidth(120)
+            except Exception:
+                pass
+
+            row_layout.addWidget(lbl)
+            row_layout.addStretch()
+            row_layout.addWidget(spin)
+            group_layout.addWidget(row)
+
             self._spins[key] = spin
             # Live autosave via callback
             spin.valueChanged.connect(lambda _v, k=key, w=spin: self._emit_change(k, float(w.value())))
@@ -55,8 +160,24 @@ class ConfigDialog(QDialog):
         add_spin("end_translation_tolerance_meters", "End Translation Tolerance (m)", float(cfg.get("end_translation_tolerance_meters", 0.05) or 0.05), (0.0, 1.0), 0.01)
         add_spin("end_rotation_tolerance_deg", "End Rotation Tolerance (deg)", float(cfg.get("end_rotation_tolerance_deg", 2.0) or 2.0), (0.0, 180.0), 0.1)
 
-        # Buttons
+        # Buttons styled to fit dark UI
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, orientation=Qt.Horizontal, parent=self)
+        try:
+            buttons.setStyleSheet(
+                """
+                QDialogButtonBox QPushButton {
+                    background-color: #303030;
+                    color: #eeeeee;
+                    border: 1px solid #5a5a5a;
+                    border-radius: 4px;
+                    padding: 4px 10px;
+                }
+                QDialogButtonBox QPushButton:hover { background: #575757; }
+                QDialogButtonBox QPushButton:pressed { background: #6a6a6a; }
+                """
+            )
+        except Exception:
+            pass
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
