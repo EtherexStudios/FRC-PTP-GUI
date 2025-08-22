@@ -382,6 +382,12 @@ class Sidebar(QWidget):
         self.constraint_manager.constraintRemoved.connect(lambda key: (self.modelChanged.emit(), self.refresh_current_selection()))
         self.constraint_manager.constraintValueChanged.connect(lambda key, val: self.modelChanged.emit())
         self.constraint_manager.constraintRangeChanged.connect(lambda key, start, end: self.modelChanged.emit())
+        # Forward undo/redo coordination from constraint manager so main window can snapshot
+        try:
+            self.constraint_manager.aboutToChange.connect(self.aboutToChange)
+            self.constraint_manager.userActionOccurred.connect(self.userActionOccurred)
+        except Exception:
+            pass
         
         # Forward preview signals
         self.constraint_manager.constraintRangePreviewRequested.connect(self.constraintRangePreviewRequested)

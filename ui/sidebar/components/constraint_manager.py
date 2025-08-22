@@ -19,6 +19,9 @@ class ConstraintManager(QObject):
     constraintRemoved = Signal(str)  # key
     constraintValueChanged = Signal(str, float)  # key, value
     constraintRangeChanged = Signal(str, int, int)  # key, start, end
+    # Undo/redo coordination signals (forwarded by Sidebar)
+    aboutToChange = Signal(str)
+    userActionOccurred = Signal(str)
     
     # Preview overlay signals
     constraintRangePreviewRequested = Signal(str, int, int)  # key, start_ordinal, end_ordinal
@@ -109,51 +112,9 @@ class ConstraintManager(QObject):
                             occupied_units.add(int(u))
                     except Exception:
                         continue
-                # If domain fully occupied, attempt to split the largest existing range to make room
+                # If domain fully occupied, refuse to add
                 if len(occupied_units) >= total:
-                    # Identify the largest existing contiguous range
-                    largest_rc = None
-                    largest_len = 0
-                    largest_bounds = (1, 1)
-                    for rc in existing_for_key:
-                        try:
-                            l0 = int(getattr(rc, 'start_ordinal', 1))
-                            h0 = int(getattr(rc, 'end_ordinal', total))
-                            l0 = max(1, min(l0, total))
-                            h0 = max(1, min(h0, total))
-                            if h0 < l0:
-                                h0 = l0
-                            cur_len = int(h0 - l0 + 1)
-                            if cur_len > largest_len:
-                                largest_len = cur_len
-                                largest_rc = rc
-                                largest_bounds = (int(l0), int(h0))
-                        except Exception:
-                            continue
-                    # Only proceed if we can actually split a range (length >= 2)
-                    if largest_rc is None or largest_len < 2:
-                        return False
-                    # Split into two halves; keep the larger half with the existing rc to minimize impact
-                    left_len = int(math.ceil(largest_len / 2.0))
-                    right_len = int(largest_len - left_len)
-                    l_start, h_end = largest_bounds
-                    left_end = int(l_start + left_len - 1)
-                    # Adjust existing largest to the left half
-                    try:
-                        largest_rc.start_ordinal = int(l_start)
-                        largest_rc.end_ordinal = int(left_end)
-                    except Exception:
-                        pass
-                    # Place the new constraint in the right half
-                    new_rc = RangedConstraint(key=key, value=value, start_ordinal=int(left_end + 1), end_ordinal=int(h_end))
-                    self.path.ranged_constraints.append(new_rc)
-                    # Clear flat value storage for ranged keys and emit
-                    try:
-                        setattr(self.path.constraints, key, None)
-                    except Exception:
-                        pass
-                    self.constraintAdded.emit(key, value)
-                    return True
+                    return False
                 # Create with placeholder ordinals; we'll assign a free slot below
                 new_rc = RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total)
                 # Choose the first free unit (minimal touch of existing ranges)
@@ -485,6 +446,12 @@ class ConstraintManager(QObject):
                 # Map slider handles (1..total+1) -> model ordinals (1..total)
                 start1 = max(1, min(int(l), int(total)))
                 end1 = max(1, min(int(h - 1), int(total)))
+                # Announce about-to-change for undo snapshot
+                try:
+                    label = SPINNER_METADATA.get(key, {}).get('label', key).replace('<br/>', ' ')
+                    self.aboutToChange.emit(f"Edit Range: {label}")
+                except Exception:
+                    pass
                 try:
                     rc_obj.start_ordinal = start1
                     rc_obj.end_ordinal = end1
@@ -493,6 +460,10 @@ class ConstraintManager(QObject):
                 self.constraintRangeChanged.emit(key, start1, end1)
                 self._active_preview_key = key
                 self.constraintRangePreviewRequested.emit(key, start1, end1)
+                try:
+                    self.userActionOccurred.emit(f"Edit Range: {label}")
+                except Exception:
+                    pass
                 # Update previous only if not blocked (or to the reverted values we used)
                 self._slider_prev_values[sld] = (int(l), int(h))
 
@@ -623,6 +594,12 @@ class ConstraintManager(QObject):
 
                 def _make_remove_handler(target_rc):
                     def _remove():
+                        # Announce about-to-change for undo snapshot
+                        try:
+                            label = SPINNER_METADATA.get(key, {}).get('label', key).replace('<br/>', ' ')
+                            self.aboutToChange.emit(f"Remove {label}")
+                        except Exception:
+                            pass
                         try:
                             self.path.ranged_constraints = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if rc is not target_rc]
                         except Exception:
@@ -636,6 +613,10 @@ class ConstraintManager(QObject):
                             except Exception:
                                 pass
                             self.constraintRemoved.emit(key)
+                            try:
+                                self.userActionOccurred.emit(f"Remove {label}")
+                            except Exception:
+                                pass
                             return
                         # Rebuild UI for remaining instances
                         try:
@@ -645,6 +626,10 @@ class ConstraintManager(QObject):
                         # Refresh preview to first instance
                         try:
                             self.set_active_preview_key(key)
+                        except Exception:
+                            pass
+                        try:
+                            self.userActionOccurred.emit(f"Remove {label}")
                         except Exception:
                             pass
                     return _remove
@@ -675,9 +660,24 @@ class ConstraintManager(QObject):
             spins.append(spinbox)
 
             # Connect value change per instance
-            def _make_value_handler(target_rc):
-                return lambda v: self._update_single_ranged_constraint_value(key, target_rc, float(v))
-            spinbox.valueChanged.connect(_make_value_handler(rc_obj))
+            def _make_value_handler(target_rc, is_primary: bool):
+                def _handler(v):
+                    # Primary instance (idx==0) changes already go through Sidebar.on_attribute_change
+                    # and are snapshot by Sidebar/MainWindow. Only emit undo signals for extra instances.
+                    if not is_primary:
+                        try:
+                            label = SPINNER_METADATA.get(key, {}).get('label', key).replace('<br/>', ' ')
+                            self.aboutToChange.emit(f"Edit Path Constraint: {label}")
+                        except Exception:
+                            pass
+                    self._update_single_ranged_constraint_value(key, target_rc, float(v))
+                    if not is_primary:
+                        try:
+                            self.userActionOccurred.emit(f"Edit Path Constraint: {label}")
+                        except Exception:
+                            pass
+                return _handler
+            spinbox.valueChanged.connect(_make_value_handler(rc_obj, idx == 0))
 
             # While interacting with the spinbox, also show the corresponding range preview
             try:
@@ -1005,9 +1005,8 @@ class ConstraintManager(QObject):
             _domain, count = self.get_domain_info_for_key(key)
             total = int(count) if int(count) > 0 else 1
             existing = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
-            # Compute occupied units and whether a split is feasible
+            # Compute occupied units instead of relying on count of instances
             occupied_units = set()
-            largest_len = 0
             for rc in existing:
                 try:
                     l = int(getattr(rc, 'start_ordinal', 1))
@@ -1018,13 +1017,9 @@ class ConstraintManager(QObject):
                         h = l
                     for u in range(int(l), int(h) + 1):
                         occupied_units.add(int(u))
-                    largest_len = max(largest_len, int(h - l + 1))
                 except Exception:
                     continue
-            if len(occupied_units) < total:
-                return True
-            # If fully occupied but there exists a range of length >= 2, we can split
-            return largest_len >= 2
+            return len(occupied_units) < total
         except Exception:
             return False
 

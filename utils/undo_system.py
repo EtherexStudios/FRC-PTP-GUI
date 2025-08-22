@@ -55,6 +55,11 @@ class PathCommand(Command):
         """Apply the new state to the path."""
         self.path_ref.path_elements = copy.deepcopy(self.new_state.path_elements)
         self.path_ref.constraints = copy.deepcopy(self.new_state.constraints)
+        # Also restore ranged constraints to fully capture constraint UI edits
+        try:
+            self.path_ref.ranged_constraints = copy.deepcopy(getattr(self.new_state, 'ranged_constraints', []))
+        except Exception:
+            pass
         if self.on_change_callback:
             self.on_change_callback()
     
@@ -62,6 +67,11 @@ class PathCommand(Command):
         """Revert to the old state."""
         self.path_ref.path_elements = copy.deepcopy(self.old_state.path_elements)
         self.path_ref.constraints = copy.deepcopy(self.old_state.constraints)
+        # Also revert ranged constraints
+        try:
+            self.path_ref.ranged_constraints = copy.deepcopy(getattr(self.old_state, 'ranged_constraints', []))
+        except Exception:
+            pass
         if self.on_change_callback:
             self.on_change_callback()
     

@@ -742,7 +742,8 @@ class MainWindow(QMainWindow):
         self._config_undo_recorded = False
         cfg = self.project_manager.load_config()
         dlg = ConfigDialog(self, cfg, on_change=self._on_config_live_change)
-        if dlg.exec() == QDialog.Accepted:
+        result = dlg.exec()
+        if result == QDialog.Accepted:
             new_cfg = dlg.get_values()
             self.project_manager.save_config(new_cfg)
             # Apply to canvas if robot dims changed
@@ -754,22 +755,30 @@ class MainWindow(QMainWindow):
             # Refresh sidebar for current selection so defaults/UI reflect changes
             self.sidebar.refresh_current_selection()
             
-            # Record the config change for undo/redo if not already recorded via live-change
-            if not self._config_undo_recorded:
-                self._record_config_change("Edit Config", old_config)
+            # Record the config change for undo/redo as a single grouped entry
+            self._record_config_change("Change Defaults", old_config)
+        else:
+            # User cancelled -> auto-undo all changes by restoring the original snapshot
+            try:
+                # Restore original config snapshot
+                if self._config_edit_old_config is not None:
+                    self.project_manager.config = copy.deepcopy(self._config_edit_old_config)
+                    self.project_manager.save_config()
+                    # Apply any visual impacts
+                    self._apply_robot_dims_from_config(self.project_manager.config)
+                    self.canvas.request_simulation_rebuild()
+                    self.sidebar.refresh_current_selection()
+            except Exception:
+                pass
         # Clear session flags after dialog closes
         self._config_edit_old_config = None
         self._config_undo_recorded = False
 
     def _on_config_live_change(self, key: str, value: float):
-        # Record each individual config change for granular undo/redo
-        old_config = copy.deepcopy(self.project_manager.config)
-        # Persist to config immediately
+        # Persist to config immediately, but do NOT create per-item undo entries
         self.project_manager.save_config({key: value})
-        # Create undo command with specific description
-        key_label = self._get_config_key_label(key)
-        desc = f"Edit Config: {key_label}"
-        self._record_config_change(desc, old_config)
+        # Track that we had at least one live change during this session
+        self._config_undo_recorded = True
         
         if key in ("robot_length_meters", "robot_width_meters"):
             self._apply_robot_dims_from_config(self.project_manager.config)
