@@ -7,7 +7,7 @@ with MainWindow and Sidebar interactions. Further pruning can follow.
 from __future__ import annotations
 import math, os
 from typing import List, Optional, Tuple
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsItem
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsItem, QFrame
 from PySide6.QtCore import Qt, QPointF, QTimer, QRect, Signal, QPoint
 from PySide6.QtGui import QPainter, QPixmap, QTransform, QColor, QPen, QBrush
 
@@ -39,6 +39,21 @@ class CanvasView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setFocusPolicy(Qt.StrongFocus)
+        # Subtle rounded corners on the canvas frame
+        try:
+            self.setAttribute(Qt.WA_StyledBackground, True)
+            # Keep the frame visually minimal while rounding corners
+            self.setFrameShape(QFrame.NoFrame)
+            # Apply rounding to both the view and its viewport to ensure clipping
+            self.setStyleSheet("QGraphicsView { border-radius: 8px; background: palette(Base); }")
+            if self.viewport() is not None:
+                try:
+                    self.viewport().setAttribute(Qt.WA_StyledBackground, True)
+                    self.viewport().setStyleSheet("border-radius: 8px; background: palette(Base);")
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._is_fitting = False
         self._suppress_live_events = False
         self._rotation_t_cache: Optional[dict[int,float]] = None
@@ -648,9 +663,31 @@ class CanvasView(QGraphicsView):
         try: self.rotationDragFinished.emit(int(index))
         except Exception: pass
 
+    def _should_start_pan(self, pos) -> bool:
+        """Return True if a left-click at view position pos should start panning.
+        Pan on empty/background areas; avoid panning on interactive items or the
+        transport overlay.
+        """
+        try:
+            item = self.itemAt(pos)
+            if item is None:
+                return True
+            # Avoid panning when clicking the transport overlay
+            from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsProxyWidget
+            if isinstance(item, QGraphicsProxyWidget):
+                return False
+            # Allow panning when clicking the background pixmap
+            if isinstance(item, QGraphicsPixmapItem):
+                return True
+            # Otherwise, assume it's an interactive scene item; don't pan
+            return False
+        except Exception:
+            return False
+
     def mousePressEvent(self,event):
         try:
-            if event.button()==Qt.RightButton:
+            # Use left-click to pan on empty/background (not on interactive items)
+            if event.button()==Qt.LeftButton and self._should_start_pan(event.pos()):
                 self._is_panning=True; self._pan_start=event.pos(); self.viewport().setCursor(Qt.ClosedHandCursor); event.accept(); return
         except Exception: pass
         super().mousePressEvent(event)
@@ -677,7 +714,7 @@ class CanvasView(QGraphicsView):
 
     def mouseReleaseEvent(self,event):
         try:
-            if event.button()==Qt.RightButton and self._is_panning:
+            if event.button()==Qt.LeftButton and self._is_panning:
                 self._is_panning=False; self._pan_start=None; self.viewport().setCursor(Qt.ArrowCursor); event.accept(); return
         except Exception: pass
         super().mouseReleaseEvent(event)

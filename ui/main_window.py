@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog, QToolBar, QToolButton, QApplication
+from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog, QToolBar, QToolButton, QApplication, QFrame, QSizePolicy
 from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QPainter, QPolygon, QPen, QBrush, QColor
 from PySide6.QtCore import QPoint, QSize
 import math
@@ -33,11 +33,29 @@ class MainWindow(QMainWindow):
         central = QWidget()  # Blank container for content
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)  # Horizontal split
+        try:
+            # Eliminate outer margins so both canvas and sidebar bottoms align to window bottom
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+        except Exception:
+            pass
 
         # Canvas (left)
         # Initialize canvas with default robot dims; will update after config load
         self.canvas = CanvasView()
         layout.addWidget(self.canvas, stretch=3)  # Wider
+
+        # Thin vertical divider between canvas and sidebar
+        try:
+            divider = QFrame()
+            divider.setObjectName("sidebarDivider")
+            divider.setFrameShape(QFrame.NoFrame)
+            divider.setFixedWidth(1)
+            divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            divider.setStyleSheet("QFrame#sidebarDivider { background-color: #3b3b3b; }")
+            layout.addWidget(divider)
+        except Exception:
+            pass
 
         # Placeholder for sidebar (right)
         self.sidebar = Sidebar()
@@ -209,12 +227,65 @@ class MainWindow(QMainWindow):
         # Ensure menu bar is visible
         bar.setVisible(True)
         bar.setNativeMenuBar(False)  # Force Qt menu bar instead of native macOS menu
+        # Style to visually align with the app's dark UI
+        try:
+            bar.setStyleSheet(
+                """
+                QMenuBar {
+                    background-color: #2f2f2f;
+                    border: none;
+                    border-bottom: 1px solid #4a4a4a;
+                    padding: 1px 6px;
+                    color: #eeeeee;
+                    font-size: 13px;
+                }
+                QMenuBar::item {
+                    background: transparent;
+                    padding: 3px 6px;
+                    margin: 0px 2px;
+                    border-radius: 4px;
+                    border-left: 1px solid #3b3b3b; /* slim vertical separator */
+                }
+                QMenuBar::item:selected {
+                    background: #555555;
+                }
+                QMenuBar::item:pressed {
+                    background: #666666;
+                }
+
+                QMenu {
+                    background-color: #242424;
+                    border: 1px solid #3f3f3f;
+                    color: #f0f0f0;
+                    padding: 3px 0;
+                }
+                QMenu::item {
+                    padding: 3px 10px;
+                    margin: 1px 3px;
+                    border-radius: 3px;
+                }
+                QMenu::item:selected {
+                    background: #555555;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    margin: 2px 6px; /* slim horizontal spacers */
+                    background: #3b3b3b;
+                }
+                QMenu::indicator {
+                    background: transparent;
+                }
+                """
+            )
+        except Exception:
+            pass
         
         # Project menu - for opening and managing projects
         project_menu: QMenu = bar.addMenu("Project")
         self.action_open_project = QAction("Open Project…", self)
         self.action_open_project.triggered.connect(self._action_open_project)
         project_menu.addAction(self.action_open_project)
+        project_menu.addSeparator()
         
         # Recent Projects submenu
         self.menu_recent_projects: QMenu = project_menu.addMenu("Recent Projects")
@@ -233,21 +304,25 @@ class MainWindow(QMainWindow):
         # Load Path submenu (dynamic)
         self.menu_load_path: QMenu = path_menu.addMenu("Load Path")
         self.menu_load_path.aboutToShow.connect(self._populate_load_path_menu)
+        path_menu.addSeparator()
 
         # Create New Path action
         self.action_new_path = QAction("Create New Path", self)
         self.action_new_path.triggered.connect(self._action_create_new_path)
         path_menu.addAction(self.action_new_path)
+        path_menu.addSeparator()
 
         # Save As…
         self.action_save_as = QAction("Save Path As…", self)
         self.action_save_as.triggered.connect(self._action_save_as)
         path_menu.addAction(self.action_save_as)
+        path_menu.addSeparator()
         
         # Rename Path action
         self.action_rename_path = QAction("Rename Path…", self)
         self.action_rename_path.triggered.connect(self._action_rename_path)
         path_menu.addAction(self.action_rename_path)
+        path_menu.addSeparator()
         
         # Delete Path action (opens dialog)
         self.action_delete_path = QAction("Delete Paths...", self)
@@ -258,13 +333,14 @@ class MainWindow(QMainWindow):
         edit_menu: QMenu = bar.addMenu("Edit")
         
         # Create undo/redo actions with shortcuts and small icons
-        self.action_undo = QAction(self._create_arrow_icon("undo", 14), "Undo", self)
+        self.action_undo = QAction(self._create_arrow_icon("undo", 12), "Undo", self)
         self.action_undo.setShortcut(QKeySequence.Undo)  # Use standard undo shortcut
         self.action_undo.triggered.connect(self._action_undo)
         self.action_undo.setEnabled(False)  # Will be enabled when undo is available
         edit_menu.addAction(self.action_undo)
+        edit_menu.addSeparator()
         
-        self.action_redo = QAction(self._create_arrow_icon("redo", 14), "Redo", self)
+        self.action_redo = QAction(self._create_arrow_icon("redo", 12), "Redo", self)
         self.action_redo.setShortcut(QKeySequence.Redo)  # Use standard redo shortcut
         self.action_redo.triggered.connect(self._action_redo)
         self.action_redo.setEnabled(False)  # Will be enabled when redo is available

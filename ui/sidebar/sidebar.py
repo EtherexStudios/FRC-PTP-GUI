@@ -68,6 +68,11 @@ class Sidebar(QWidget):
     def _setup_ui(self):
         """Set up the UI layout and widgets."""
         main_layout = QVBoxLayout(self)
+        # Remove outer margins so the constraints area reaches the window bottom inline with canvas
+        try:
+            main_layout.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
         # Lock the entire sidebar to a fixed width so it doesn't resize
         self.setFixedWidth(300)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -347,6 +352,11 @@ class Sidebar(QWidget):
         # Let this section expand to consume available vertical space while still scrolling internally
         self.constraints_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         parent_layout.addWidget(self.constraints_scroll)
+        try:
+            # Ensure the scroll area consumes remaining vertical space and sits flush at bottom
+            self.constraints_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
 
         # Balance vertical expansion dynamically: favor constraints section
         form_idx = parent_layout.indexOf(self.form_container)
