@@ -774,11 +774,31 @@ class CanvasView(QGraphicsView):
                 except Exception:
                     continue
             return
-        # Translation-domain (or other) anchors: draw between consecutive anchors, optionally including preceding segment
-        if lo==hi: return
-        if lo>1: lo-=1
-        for j in range(lo-1, hi-1):
-            if j+1 >= len(anchors): break
-            _,a=anchors[j]; _,b=anchors[j+1]
-            line=QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y()); line.setPen(green_pen); line.setZValue(25)
-            self.graphics_scene.addItem(line); self._range_overlay_lines.append(line)
+        # Translation-domain anchors: mirror rotation logic by mapping ordinal anchors to global indices
+        tr_indices = [idx for idx,(k,_it,_h) in enumerate(self._items) if k in ('translation','waypoint')]
+        if not tr_indices:
+            return
+        lo = max(1, min(int(lo), len(tr_indices)))
+        hi = max(1, min(int(hi), len(tr_indices)))
+        if lo > hi:
+            lo, hi = hi, lo
+        start_anchor_i = lo - 1
+        if lo > 1:
+            start_anchor_i = lo - 2  # include the segment leading into the first selected anchor
+        end_anchor_i = hi - 1
+        start_global = tr_indices[start_anchor_i]
+        end_global = tr_indices[end_anchor_i]
+        if start_global > end_global:
+            start_global, end_global = end_global, start_global
+        for j in range(start_global, end_global):
+            if j < 0 or j+1 >= len(self._items):
+                break
+            try:
+                _k1,a,_h1 = self._items[j]
+                _k2,b,_h2 = self._items[j+1]
+                if a is None or b is None:
+                    continue
+                line=QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y()); line.setPen(green_pen); line.setZValue(25)
+                self.graphics_scene.addItem(line); self._range_overlay_lines.append(line)
+            except Exception:
+                continue

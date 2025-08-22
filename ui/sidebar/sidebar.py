@@ -695,14 +695,19 @@ class Sidebar(QWidget):
                     optional_display_items.append(display)
                     self.property_editor.optional_display_to_key[display] = key
 
-                # For ranged-capable constraints, always provide an option to add another instance
+                # For ranged-capable constraints, only provide (+) if we can add more instances
                 if key in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2',
                            'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'):
-                    add_more_label = _menu_label_for_key(key) + ' (+)'
-                    # Avoid duplicate entry if already added in this pass
-                    if add_more_label not in optional_display_items:
-                        optional_display_items.append(add_more_label)
-                        self.property_editor.optional_display_to_key[add_more_label] = key
+                    try:
+                        can_more = self.constraint_manager.can_add_more_instances(key)
+                    except Exception:
+                        can_more = True
+                    if can_more:
+                        add_more_label = _menu_label_for_key(key) + ' (+)'
+                        # Avoid duplicate entry if already added in this pass
+                        if add_more_label not in optional_display_items:
+                            optional_display_items.append(add_more_label)
+                            self.property_editor.optional_display_to_key[add_more_label] = key
                     
         # Return optional items list
         return optional_display_items

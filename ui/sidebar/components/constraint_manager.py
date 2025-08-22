@@ -36,6 +36,9 @@ class ConstraintManager(QObject):
         self._active_preview_key = None
         # Map of constraint key -> field container used in constraints layout
         self._constraint_field_containers = {}
+        # Track previous slider values to detect and block overlapping moves
+        self._slider_prev_values: Dict[RangeSlider, Tuple[int,int]] = {}
+        self._enforcing_slider_constraints: bool = False
         
     def set_path(self, path: Path):
         """Set the path to manage constraints for."""
@@ -85,9 +88,59 @@ class ConstraintManager(QObject):
             try:
                 _domain, count = self.get_domain_info_for_key(key)
                 total = int(count) if int(count) > 0 else 1
+                # Enforce maximum number of instances equal to total available unit segments
+                try:
+                    existing_for_key = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
+                except Exception:
+                    existing_for_key = []
+                if len(existing_for_key) >= total:
+                    return False
                 if not hasattr(self.path, 'ranged_constraints') or self.path.ranged_constraints is None:
                     self.path.ranged_constraints = []
-                self.path.ranged_constraints.append(RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total))
+                # Create with placeholder ordinals; we'll assign a free slot below
+                new_rc = RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total)
+                # Find first free unit segment [pos, pos+1) that doesn't overlap others
+                existing = existing_for_key
+                intervals = []  # slider-space intervals [low, high)
+                for rc in existing:
+                    try:
+                        l = int(getattr(rc, 'start_ordinal', 1))
+                        h = int(getattr(rc, 'end_ordinal', total)) + 1
+                        intervals.append((max(1, min(l, total)), max(2, min(h, total + 1))))
+                    except Exception:
+                        continue
+                # Scan for free position
+                chosen = None
+                for pos in range(1, total + 1):
+                    low = pos; high = pos + 1
+                    overlap = False
+                    for (bl, bh) in intervals:
+                        if low < bh and bl < high:
+                            overlap = True; break
+                    if not overlap:
+                        chosen = pos; break
+                if chosen is None:
+                    # No immediate free unit found; fall back to placing at the end abutting last interval
+                    # Sort intervals and pick the largest gap, if any
+                    intervals_sorted = sorted(intervals)
+                    best_gap = None
+                    best_pos = None
+                    last = 1
+                    for (bl, bh) in intervals_sorted:
+                        if bl > last:
+                            gap = bl - last
+                            if gap >= 1:
+                                best_gap = gap; best_pos = last; break
+                        last = max(last, bh)
+                    if best_pos is not None:
+                        chosen = best_pos
+                    else:
+                        # As a final resort, clamp to the last notch
+                        chosen = max(1, total)
+                # Assign minimal non-overlapping width at chosen position
+                new_rc.start_ordinal = int(chosen)
+                new_rc.end_ordinal = int(chosen)
+                self.path.ranged_constraints.append(new_rc)
             except Exception:
                 pass
             # Clear flat value storage for ranged keys
@@ -372,9 +425,17 @@ class ConstraintManager(QObject):
             sld = RangeSlider(1, slider_max)
             sld.setValues(low_i, high_i)
             sld.setFocusPolicy(Qt.StrongFocus)
+            # Initialize previous values tracker for overlap enforcement
+            self._slider_prev_values[sld] = (int(low_i), int(high_i))
 
             def _preview():
                 l, h = sld.values()
+                # Block moves that would create overlap with other sliders for this key
+                if self._would_overlap_for_key(key, sld, int(l), int(h)):
+                    # Revert to previous valid values
+                    prev_l, prev_h = self._slider_prev_values.get(sld, (int(l), int(h)))
+                    sld._setValuesInternal(int(prev_l), int(prev_h))
+                    return
                 # Slider positions are conceptually 0-based; model ordinals are 1-based
                 # start = left_position (0-based) -> +1 => l
                 # end = right_position - 1 (0-based) -> +1 => (h - 1)
@@ -382,9 +443,18 @@ class ConstraintManager(QObject):
                 end1 = max(1, min(int(h - 1), int(total)))
                 self._active_preview_key = key
                 self.constraintRangePreviewRequested.emit(key, start1, end1)
+                # Accept move; update previous
+                self._slider_prev_values[sld] = (int(l), int(h))
 
             def _commit():
                 l, h = sld.values()
+                blocked = False
+                if self._would_overlap_for_key(key, sld, int(l), int(h)):
+                    # Revert to previous and treat as commit of previous
+                    prev_l, prev_h = self._slider_prev_values.get(sld, (int(l), int(h)))
+                    sld._setValuesInternal(int(prev_l), int(prev_h))
+                    l, h = int(prev_l), int(prev_h)
+                    blocked = True
                 # Map slider handles (1..total+1) -> model ordinals (1..total)
                 start1 = max(1, min(int(l), int(total)))
                 end1 = max(1, min(int(h - 1), int(total)))
@@ -396,6 +466,8 @@ class ConstraintManager(QObject):
                 self.constraintRangeChanged.emit(key, start1, end1)
                 self._active_preview_key = key
                 self.constraintRangePreviewRequested.emit(key, start1, end1)
+                # Update previous only if not blocked (or to the reverted values we used)
+                self._slider_prev_values[sld] = (int(l), int(h))
 
             sld.rangeChanged.connect(lambda _l, _h: _preview())
             sld.interactionFinished.connect(lambda _l, _h: (setattr(self, '_active_preview_key', key), _commit()))
@@ -425,6 +497,29 @@ class ConstraintManager(QObject):
         _remove_existing_sliders_from_row(spin_row)
 
         # Build UI for each instance
+        # Before building, ensure sliders will be non-overlapping by adjusting any colliding instances
+        def _normalize_instances(instances: List[Any]):
+            try:
+                used = set()
+                for rc in instances:
+                    l = int(getattr(rc, 'start_ordinal', 1))
+                    h = int(getattr(rc, 'end_ordinal', total))
+                    # reduce to minimal width unit if invalid
+                    if h < l: h = l
+                    # find a free position if [l,h] collides with existing
+                    pos = l
+                    while pos <= total and (pos in used):
+                        pos += 1
+                    if pos > total:
+                        pos = total
+                    setattr(rc, 'start_ordinal', int(pos))
+                    setattr(rc, 'end_ordinal', int(pos))
+                    used.add(int(pos))
+            except Exception:
+                pass
+
+        _normalize_instances(ranged_list)
+
         for idx, rc_obj in enumerate(ranged_list):
             # Determine spinbox to use
             if idx == 0:
@@ -696,6 +791,7 @@ class ConstraintManager(QObject):
             self._range_slider_rows.clear()
             self._range_sliders.clear()
             self._range_spinboxes.clear()
+            self._slider_prev_values.clear()
         except Exception:
             pass
             
@@ -761,6 +857,46 @@ class ConstraintManager(QObject):
             return False
             
         return False
+
+    def can_add_more_instances(self, key: str) -> bool:
+        """Return True if another ranged instance can be added for this key (i.e., below max).
+        Max equals the number of unit segments (total) = number of slider notches - 1.
+        """
+        if self.path is None:
+            return False
+        if key in NON_RANGED_CONSTRAINT_KEYS:
+            return False
+        try:
+            _domain, count = self.get_domain_info_for_key(key)
+            total = int(count) if int(count) > 0 else 1
+            existing = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
+            return len(existing) < total
+        except Exception:
+            return False
+
+    # ---- Overlap enforcement helpers ----
+    def _would_overlap_for_key(self, key: str, active_slider: RangeSlider, new_low: int, new_high: int) -> bool:
+        """Return True if setting active_slider to [new_low, new_high) would overlap any
+        other slider of the same key. Touching at boundaries is allowed.
+        """
+        try:
+            if self._enforcing_slider_constraints:
+                return False
+            self._enforcing_slider_constraints = True
+            sliders = self._range_sliders.get(key, []) or []
+            for s in sliders:
+                if s is active_slider:
+                    continue
+                try:
+                    b_low, b_high = s.values()
+                except Exception:
+                    continue
+                # Overlap check on half-open intervals [low, high)
+                if int(new_low) < int(b_high) and int(b_low) < int(new_high):
+                    return True
+            return False
+        finally:
+            self._enforcing_slider_constraints = False
         
     def get_constraint_value(self, key: str) -> Optional[float]:
         """Get the current value of a constraint."""
