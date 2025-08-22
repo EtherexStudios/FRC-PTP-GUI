@@ -747,7 +747,6 @@ class MainWindow(QMainWindow):
         labels = {
             'robot_length_meters': 'Robot Length',
             'robot_width_meters': 'Robot Width',
-            'final_velocity_meters_per_sec': 'Default Final Velocity',
             'max_velocity_meters_per_sec': 'Default Max Velocity',
             'max_acceleration_meters_per_sec2': 'Default Max Accel',
             'intermediate_handoff_radius_meters': 'Default Handoff Radius',

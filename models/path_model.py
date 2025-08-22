@@ -8,7 +8,6 @@ class PathElement(ABC):
 
 @dataclass
 class Constraints:
-    final_velocity_meters_per_sec: Optional[float] = None
     max_velocity_meters_per_sec: Optional[float] = None
     max_acceleration_meters_per_sec2: Optional[float] = None
     max_velocity_deg_per_sec: Optional[float] = None

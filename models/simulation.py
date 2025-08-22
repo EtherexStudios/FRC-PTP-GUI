@@ -501,7 +501,6 @@ def simulate_path(
         return SimResult(poses_by_time=poses_by_time, times_sorted=times_sorted, total_time_s=0.0, trail_points=trail_points)
 
     c = getattr(path, "constraints", None)
-    final_v = _resolve_constraint(getattr(c, "final_velocity_meters_per_sec", None), cfg.get("final_velocity_meters_per_sec"), 0.0)
     base_max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("max_velocity_meters_per_sec"), 3.0)
     base_max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("max_acceleration_meters_per_sec2"), 2.5)
 
@@ -671,7 +670,7 @@ def simulate_path(
 
         max_a_mag = min(max_a, max_a_dyn)
 
-        v_allow_decel = math.sqrt(max(final_v * final_v, 0.0) + 2.0 * max_a_mag * remaining)
+        v_allow_decel = math.sqrt(2.0 * max_a_mag * remaining)
         v_max_accel = v_curr + max_a_mag * dt_s
         v_min_decel = max(0.0, v_curr - max_a_mag * dt_s)
 

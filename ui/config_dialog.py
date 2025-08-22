@@ -47,7 +47,6 @@ class ConfigDialog(QDialog):
         add_spin("robot_width_meters", "Robot Width (m)", cfg.get("robot_width_meters", 0.60) or 0.60, (0.05, 5.0), 0.01)
 
         # Optional defaults
-        add_spin("final_velocity_meters_per_sec", "Default Final Velocity (m/s)", float(cfg.get("final_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 99999.0), 0.1)
         add_spin("max_velocity_meters_per_sec", "Default Max Velocity (m/s)", float(cfg.get("max_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 99999.0), 0.1)
         add_spin("max_acceleration_meters_per_sec2", "Default Max Accel (m/s²)", float(cfg.get("max_acceleration_meters_per_sec2", 0.0) or 0.0), (0.0, 99999.0), 0.1)
         add_spin("intermediate_handoff_radius_meters", "Default Handoff Radius (m)", float(cfg.get("intermediate_handoff_radius_meters", 0.0) or 0.0), (0.0, 99999.0), 0.05)

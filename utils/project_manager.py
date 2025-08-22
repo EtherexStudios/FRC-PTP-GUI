@@ -13,7 +13,6 @@ from models.path_model import Path, PathElement, RotationTarget, TranslationTarg
 DEFAULT_CONFIG: Dict[str, float] = {
     "robot_length_meters": 0.5,
     "robot_width_meters": 0.5,
-    "final_velocity_meters_per_sec": 0.0,
     "max_velocity_meters_per_sec": 4.5,
     "max_acceleration_meters_per_sec2": 7.0,
     "intermediate_handoff_radius_meters": 0.2,
@@ -26,7 +25,6 @@ DEFAULT_CONFIG: Dict[str, float] = {
 EXAMPLE_CONFIG: Dict[str, float] = {
     "robot_length_meters": 0.5,
     "robot_width_meters": 0.5,
-    "final_velocity_meters_per_sec": 0.0,
     "max_velocity_meters_per_sec": 4.5,
     "max_acceleration_meters_per_sec2": 7.0,
     "intermediate_handoff_radius_meters": 0.2,
@@ -351,7 +349,6 @@ class ProjectManager:
             c = path.constraints
             # translation constraints
             for name in [
-                "final_velocity_meters_per_sec",
                 "max_velocity_meters_per_sec",
                 "max_acceleration_meters_per_sec2",
                 "end_translation_tolerance_meters",
@@ -424,7 +421,6 @@ class ProjectManager:
             constraints_block = data.get("constraints", {}) or {}
             if isinstance(constraints_block, dict) and hasattr(path, 'constraints') and path.constraints is not None:
                 for name in [
-                    "final_velocity_meters_per_sec",
                     "max_velocity_meters_per_sec",
                     "max_acceleration_meters_per_sec2",
                     "end_translation_tolerance_meters",
