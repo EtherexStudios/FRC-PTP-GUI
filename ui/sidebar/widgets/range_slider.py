@@ -210,6 +210,7 @@ class RangeSlider(QWidget):
         if not self._dragging:
             return
         x = int(event.position().x() if hasattr(event, 'position') else event.x())
+        prev_low, prev_high = self._low, self._high
         if self._dragging == 'low':
             self._setValuesInternal(self._pos_to_value(x), self._high)
         elif self._dragging == 'high':
@@ -227,6 +228,12 @@ class RangeSlider(QWidget):
                 new_high = self._max
                 new_low = new_high - self._band_width
             self._setValuesInternal(int(new_low), int(new_high))
+        # Emit live update if values changed
+        if self._low != prev_low or self._high != prev_high:
+            try:
+                self.rangeChanged.emit(self._low, self._high)
+            except Exception:
+                pass
         try:
             event.accept()
         except Exception:
