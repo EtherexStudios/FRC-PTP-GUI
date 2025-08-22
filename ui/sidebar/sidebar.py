@@ -183,7 +183,8 @@ class Sidebar(QWidget):
         
         # Form container
         self.form_container = QGroupBox()
-        self.form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Do not force vertical expansion; let constraints grow instead
+        self.form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.form_container.setStyleSheet("""
             QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; }
             QLabel { color: #f0f0f0; }
@@ -252,8 +253,7 @@ class Sidebar(QWidget):
         self.core_page.setContentsMargins(8, 0, 8, 0)
         group_box_spinner_layout.addWidget(self.core_page)
         
-        # Stretch to consume remaining vertical space
-        group_box_spinner_layout.addStretch(1)
+        # Do not add internal stretch here so this section keeps a compact height
         self.form_container.setContentsMargins(6, 6, 6, 6)
         
         parent_layout.addWidget(self.form_container)
@@ -348,11 +348,11 @@ class Sidebar(QWidget):
         self.constraints_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         parent_layout.addWidget(self.constraints_scroll)
 
-        # Balance vertical expansion dynamically
+        # Balance vertical expansion dynamically: favor constraints section
         form_idx = parent_layout.indexOf(self.form_container)
         constr_idx = parent_layout.indexOf(self.constraints_scroll)
         if form_idx != -1:
-            parent_layout.setStretch(form_idx, 1)
+            parent_layout.setStretch(form_idx, 0)
         if constr_idx != -1:
             parent_layout.setStretch(constr_idx, 1)
 
