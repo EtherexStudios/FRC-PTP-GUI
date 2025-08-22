@@ -112,9 +112,51 @@ class ConstraintManager(QObject):
                             occupied_units.add(int(u))
                     except Exception:
                         continue
-                # If domain fully occupied, refuse to add
+                # If domain fully occupied, attempt to split the largest existing range to make room
                 if len(occupied_units) >= total:
-                    return False
+                    # Identify the largest existing contiguous range
+                    largest_rc = None
+                    largest_len = 0
+                    largest_bounds = (1, 1)
+                    for rc in existing_for_key:
+                        try:
+                            l0 = int(getattr(rc, 'start_ordinal', 1))
+                            h0 = int(getattr(rc, 'end_ordinal', total))
+                            l0 = max(1, min(l0, total))
+                            h0 = max(1, min(h0, total))
+                            if h0 < l0:
+                                h0 = l0
+                            cur_len = int(h0 - l0 + 1)
+                            if cur_len > largest_len:
+                                largest_len = cur_len
+                                largest_rc = rc
+                                largest_bounds = (int(l0), int(h0))
+                        except Exception:
+                            continue
+                    # Only proceed if we can actually split a range (length >= 2)
+                    if largest_rc is None or largest_len < 2:
+                        return False
+                    # Split into two halves; keep the larger half with the existing rc to minimize impact
+                    left_len = int(math.ceil(largest_len / 2.0))
+                    right_len = int(largest_len - left_len)
+                    l_start, h_end = largest_bounds
+                    left_end = int(l_start + left_len - 1)
+                    # Adjust existing largest to the left half
+                    try:
+                        largest_rc.start_ordinal = int(l_start)
+                        largest_rc.end_ordinal = int(left_end)
+                    except Exception:
+                        pass
+                    # Place the new constraint in the right half
+                    new_rc = RangedConstraint(key=key, value=value, start_ordinal=int(left_end + 1), end_ordinal=int(h_end))
+                    self.path.ranged_constraints.append(new_rc)
+                    # Clear flat value storage for ranged keys and emit
+                    try:
+                        setattr(self.path.constraints, key, None)
+                    except Exception:
+                        pass
+                    self.constraintAdded.emit(key, value)
+                    return True
                 # Create with placeholder ordinals; we'll assign a free slot below
                 new_rc = RangedConstraint(key=key, value=value, start_ordinal=1, end_ordinal=total)
                 # Choose the first free unit (minimal touch of existing ranges)
@@ -1005,8 +1047,9 @@ class ConstraintManager(QObject):
             _domain, count = self.get_domain_info_for_key(key)
             total = int(count) if int(count) > 0 else 1
             existing = [rc for rc in (getattr(self.path, 'ranged_constraints', []) or []) if getattr(rc, 'key', None) == key]
-            # Compute occupied units instead of relying on count of instances
+            # Compute occupied units and whether a split is feasible
             occupied_units = set()
+            largest_len = 0
             for rc in existing:
                 try:
                     l = int(getattr(rc, 'start_ordinal', 1))
@@ -1017,9 +1060,13 @@ class ConstraintManager(QObject):
                         h = l
                     for u in range(int(l), int(h) + 1):
                         occupied_units.add(int(u))
+                    largest_len = max(largest_len, int(h - l + 1))
                 except Exception:
                     continue
-            return len(occupied_units) < total
+            if len(occupied_units) < total:
+                return True
+            # If fully occupied but there exists a range of length >= 2, we can split
+            return largest_len >= 2
         except Exception:
             return False
 
