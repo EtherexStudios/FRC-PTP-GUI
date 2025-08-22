@@ -246,6 +246,7 @@ class ConstraintManager(QObject):
         """Create or update a range slider for a constraint key."""
         domain, count = self.get_domain_info_for_key(key)
         total = max(1, count)
+        slider_max = total + 1  # one extra notch beyond the last anchor
         
         # Build / rebuild UI for ALL ranged instances of this key.
         # Gather current ranged constraints for this key
@@ -363,27 +364,38 @@ class ConstraintManager(QObject):
         # Helper to create slider/spinner pair for given instance index
         def _make_slider_for_instance(instance_index: int, rc_obj):
             # Determine low/high from model
-            low_i = int(getattr(rc_obj, 'start_ordinal', 1))
-            high_i = int(getattr(rc_obj, 'end_ordinal', total))
-            sld = RangeSlider(1, total)
+            low_i_model = int(getattr(rc_obj, 'start_ordinal', 1))
+            high_i_model = int(getattr(rc_obj, 'end_ordinal', total))
+            # Map model (1-based inclusive) -> slider handles (left=start, right=end+1)
+            low_i = max(1, min(low_i_model, total))
+            high_i = max(2, min(high_i_model + 1, slider_max))
+            sld = RangeSlider(1, slider_max)
             sld.setValues(low_i, high_i)
             sld.setFocusPolicy(Qt.StrongFocus)
 
             def _preview():
                 l, h = sld.values()
+                # Slider positions are conceptually 0-based; model ordinals are 1-based
+                # start = left_position (0-based) -> +1 => l
+                # end = right_position - 1 (0-based) -> +1 => (h - 1)
+                start1 = max(1, min(int(l), int(total)))
+                end1 = max(1, min(int(h - 1), int(total)))
                 self._active_preview_key = key
-                self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                self.constraintRangePreviewRequested.emit(key, start1, end1)
 
             def _commit():
                 l, h = sld.values()
+                # Map slider handles (1..total+1) -> model ordinals (1..total)
+                start1 = max(1, min(int(l), int(total)))
+                end1 = max(1, min(int(h - 1), int(total)))
                 try:
-                    rc_obj.start_ordinal = int(l)
-                    rc_obj.end_ordinal = int(h)
+                    rc_obj.start_ordinal = start1
+                    rc_obj.end_ordinal = end1
                 except Exception:
                     pass
-                self.constraintRangeChanged.emit(key, int(l), int(h))
+                self.constraintRangeChanged.emit(key, start1, end1)
                 self._active_preview_key = key
-                self.constraintRangePreviewRequested.emit(key, int(l), int(h))
+                self.constraintRangePreviewRequested.emit(key, start1, end1)
 
             sld.rangeChanged.connect(lambda _l, _h: _preview())
             sld.interactionFinished.connect(lambda _l, _h: (setattr(self, '_active_preview_key', key), _commit()))

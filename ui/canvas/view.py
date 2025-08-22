@@ -690,63 +690,95 @@ class CanvasView(QGraphicsView):
         # Future work: Extract overlay-building logic similarly.
         self.clear_constraint_range_overlay()
         if self._path is None or not self._items: return
-        # Minimal example: draw straight polyline through selected anchor range
-        anchors=[(i,it) for i,(k,it,_h) in enumerate(self._items) if k in ('translation','waypoint')]
+        # Choose anchor domain based on constraint key (translation vs rotation)
+        rotation_keys = ("max_velocity_deg_per_sec", "max_acceleration_deg_per_sec2")
+        is_rotation_domain = key in rotation_keys
+        if is_rotation_domain:
+            anchors=[(i,it) for i,(k,it,_h) in enumerate(self._items) if k in ('rotation','waypoint')]
+        else:
+            anchors=[(i,it) for i,(k,it,_h) in enumerate(self._items) if k in ('translation','waypoint')]
         if not anchors: return
         lo=int(min(start_ordinal,end_ordinal)); hi=int(max(start_ordinal,end_ordinal))
         green_pen=QPen(QColor('#15c915'), CONNECT_LINE_THICKNESS_M); green_pen.setCapStyle(Qt.RoundCap)
-        n = len(anchors)
         if lo<1: lo=1
-        if hi>n: hi=n
-        # If left handle is at the far left, tint the first element green while previewing
-        if lo == 1 and anchors:
+        if hi>len(anchors): hi=len(anchors)
+        # If left handle is at the far left, tint the appropriate first element while previewing
+        if lo == 1:
             try:
-                _idx0, first_item = anchors[0]
+                first_item = None
+                if is_rotation_domain:
+                    for kind, it, _h in self._items:
+                        if kind in ('rotation','waypoint'):
+                            first_item = it
+                            break
+                else:
+                    if self._items:
+                        first_item = self._items[0][1]
                 # Save current styles once per overlay
-                try:
-                    old_pen = first_item.pen() if hasattr(first_item, 'pen') else None
-                except Exception:
-                    old_pen = None
-                try:
-                    old_brush = first_item.brush() if hasattr(first_item, 'brush') else None
-                except Exception:
-                    old_brush = None
-                if first_item not in self._range_overlay_saved_item_styles:
-                    self._range_overlay_saved_item_styles[first_item] = (old_pen, old_brush)
-                # Apply green highlight
-                try:
-                    hl_pen = QPen(QColor('#15c915'), old_pen.widthF() if hasattr(old_pen, 'widthF') else CONNECT_LINE_THICKNESS_M)
-                    hl_pen.setCapStyle(Qt.SquareCap)
-                    hl_pen.setJoinStyle(Qt.MiterJoin)
-                    first_item.setPen(hl_pen)
-                except Exception:
-                    pass
-                try:
-                    # Only fill if the item is a circle (translation) or already filled
-                    from .items.elements import CircleElementItem
-                    if isinstance(first_item, CircleElementItem) or (hasattr(first_item, 'brush') and first_item.brush() and first_item.brush().style() != Qt.NoBrush):
-                        first_item.setBrush(QBrush(QColor('#15c915')))
-                except Exception:
-                    pass
+                if first_item is not None:
+                    try:
+                        old_pen = first_item.pen() if hasattr(first_item, 'pen') else None
+                    except Exception:
+                        old_pen = None
+                    try:
+                        old_brush = first_item.brush() if hasattr(first_item, 'brush') else None
+                    except Exception:
+                        old_brush = None
+                    if first_item not in self._range_overlay_saved_item_styles:
+                        self._range_overlay_saved_item_styles[first_item] = (old_pen, old_brush)
+                    # Apply green highlight
+                    try:
+                        hl_pen = QPen(QColor('#15c915'), old_pen.widthF() if hasattr(old_pen, 'widthF') else CONNECT_LINE_THICKNESS_M)
+                        hl_pen.setCapStyle(Qt.SquareCap)
+                        hl_pen.setJoinStyle(Qt.MiterJoin)
+                        first_item.setPen(hl_pen)
+                    except Exception:
+                        pass
+                    try:
+                        # Only fill if the item is a circle (translation) or already filled
+                        from .items.elements import CircleElementItem
+                        if isinstance(first_item, CircleElementItem) or (hasattr(first_item, 'brush') and first_item.brush() and first_item.brush().style() != Qt.NoBrush):
+                            first_item.setBrush(QBrush(QColor('#15c915')))
+                    except Exception:
+                        pass
             except Exception:
                 pass
-        # Determine the segment range to draw based on the shifted-left behavior
-        # Special-case: if left handle is at 1 -> highlight entire path
-        if lo <= 1:
-            start_idx = 0
-            end_exclusive = n-1  # draw j = 0..n-2
-        # Special-case: if left handle is at 2 -> highlight entire path except the first segment
-        elif lo == 2:
-            start_idx = 1
-            end_exclusive = n-1
-        else:
-            # General: behave as if one element to the left was also selected
-            start_idx = max(0, lo - 2)
-            end_exclusive = min(n-1, hi - 1)
-        if start_idx < 0: start_idx = 0
-        if end_exclusive < start_idx: end_exclusive = start_idx
-        for j in range(start_idx, min(end_exclusive, n-1)):
-            if j+1 >= n: break
+        if is_rotation_domain:
+            # Map rotation-domain ordinals to global path indices and draw along every segment in between
+            rot_indices = [idx for idx,(k,_it,_h) in enumerate(self._items) if k in ('rotation','waypoint')]
+            if not rot_indices:
+                return
+            lo = max(1, min(int(lo), len(rot_indices)))
+            hi = max(1, min(int(hi), len(rot_indices)))
+            if lo > hi:
+                lo, hi = hi, lo
+            start_anchor_i = lo-1
+            if lo > 1:
+                start_anchor_i = lo-2  # include the segment leading into the first selected anchor
+            end_anchor_i = hi-1
+            start_global = rot_indices[start_anchor_i]
+            end_global = rot_indices[end_anchor_i]
+            if start_global > end_global:
+                start_global, end_global = end_global, start_global
+            # Draw contiguous segments along the path between these global indices
+            for j in range(start_global, end_global):
+                if j < 0 or j+1 >= len(self._items):
+                    break
+                try:
+                    _k1,a,_h1 = self._items[j]
+                    _k2,b,_h2 = self._items[j+1]
+                    if a is None or b is None:
+                        continue
+                    line=QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y()); line.setPen(green_pen); line.setZValue(25)
+                    self.graphics_scene.addItem(line); self._range_overlay_lines.append(line)
+                except Exception:
+                    continue
+            return
+        # Translation-domain (or other) anchors: draw between consecutive anchors, optionally including preceding segment
+        if lo==hi: return
+        if lo>1: lo-=1
+        for j in range(lo-1, hi-1):
+            if j+1 >= len(anchors): break
             _,a=anchors[j]; _,b=anchors[j+1]
             line=QGraphicsLineItem(a.pos().x(), a.pos().y(), b.pos().x(), b.pos().y()); line.setPen(green_pen); line.setZValue(25)
             self.graphics_scene.addItem(line); self._range_overlay_lines.append(line)
