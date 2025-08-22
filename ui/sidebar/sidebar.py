@@ -68,8 +68,9 @@ class Sidebar(QWidget):
     def _setup_ui(self):
         """Set up the UI layout and widgets."""
         main_layout = QVBoxLayout(self)
-        self.setMinimumWidth(300)  # Set a minimum width for the sidebar
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        # Lock the entire sidebar to a fixed width so it doesn't resize
+        self.setFixedWidth(300)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
         # Top section: Path Elements title bar with add button
         self._create_path_elements_bar(main_layout)
