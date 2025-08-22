@@ -696,7 +696,7 @@ def simulate_path(
             dt=dt_s,
         )
 
-        # Apply acceleration limiting
+        # Apply acceleration limiting AFTER desired speed has been clamped to max_v
         limited = limit_acceleration(
             desired=ChassisSpeeds(vx_des, vy_des, omega_des),
             last=speeds,
@@ -704,11 +704,6 @@ def simulate_path(
             max_trans_accel_mps2=max_a,
             max_angular_accel_radps2=max_alpha,
         )
-
-        v_mag = hypot2(limited.vx_mps, limited.vy_mps)
-        if v_mag > max_v > 0.0:
-            scale = max_v / v_mag
-            limited = ChassisSpeeds(limited.vx_mps * scale, limited.vy_mps * scale, limited.omega_radps)
         if abs(limited.omega_radps) > max_omega > 0.0:
             limited = ChassisSpeeds(limited.vx_mps, limited.vy_mps, math.copysign(max_omega, limited.omega_radps))
 
