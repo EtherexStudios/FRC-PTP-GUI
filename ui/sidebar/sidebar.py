@@ -227,8 +227,8 @@ class Sidebar(QWidget):
         header_row = QWidget()
         header_row.setProperty('constraintRow', 'true')
         header_row_layout = QHBoxLayout(header_row)
-        # Reduce top/bottom padding inside the combobox bordered box
-        header_row_layout.setContentsMargins(8, 4, 8, 4)
+        # Reduce top/bottom padding inside the combobox bordered box and tighten right padding
+        header_row_layout.setContentsMargins(8, 7, 0, 4)
         header_row_layout.setSpacing(6)
         try:
             # Keep natural height; only constrain width/alignment
@@ -314,7 +314,7 @@ class Sidebar(QWidget):
         self.constraints_form_container = QGroupBox()
         self.constraints_form_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.constraints_form_container.setStyleSheet("""
-            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 6px; margin-top: 0px; }
+            QGroupBox { background-color: #242424; border: 1px solid #3f3f3f; border-radius: 8px; margin-top: 0px; }
             QLabel { color: #f0f0f0; }
             /* Encompassing container for each ranged constraint type */
             QWidget[constraintGroupContainer='true'] { background: #242a2e; border: 1px solid #3b3b3b; border-radius: 8px; margin: 4px 0; }

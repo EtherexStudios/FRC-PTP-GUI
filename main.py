@@ -18,5 +18,5 @@ sys.exit(app.exec())
 # TODO: MAKE IT SO THE LAST ELEMENT IN THE PATH IS THE FINAL VELOCITY OF THE ROBOT IN THE SIMULATION AND FOR THE JSON 
 # these should be seperate spinners from the core and optional dropdowns
 # no other elements need it or should have it as a property
-# these properties should be removed from the config.json file and be set to zero by defualt for both. 
+# these properties should be removed from the config.json file and be set to zero by default for both. 
 # each path.json should have a final and initial velocity property that is set to zero by default at the top of the file, sperate from any other properties. 
