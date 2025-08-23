@@ -512,18 +512,28 @@ def simulate_path(
     base_max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("max_acceleration_deg_per_sec2"), 360.0))
     
     def _active_translation_limit(key: str, next_anchor_ord: int) -> Optional[float]:
-        """Return active translation constraint value for the given next anchor ordinal (1-based)."""
+        """Return the most restrictive translation constraint (minimum value) active
+        for the given next anchor ordinal (1-based). If none match, returns None.
+        """
+        best: Optional[float] = None
         try:
             for rc in getattr(path, 'ranged_constraints', []) or []:
-                if not isinstance(rc, RangedConstraint):
+                try:
+                    if not isinstance(rc, RangedConstraint):
+                        continue
+                    if rc.key != key:
+                        continue
+                    l = int(getattr(rc, 'start_ordinal', 1))
+                    h = int(getattr(rc, 'end_ordinal', 1))
+                    if int(l) <= int(next_anchor_ord) <= int(h):
+                        v = float(getattr(rc, 'value', None))
+                        if v > 0.0:
+                            best = v if (best is None or v < best) else best
+                except Exception:
                     continue
-                if rc.key != key:
-                    continue
-                if int(rc.start_ordinal) <= int(next_anchor_ord) <= int(rc.end_ordinal):
-                    return float(rc.value)
         except Exception:
-            pass
-        return None
+            best = None
+        return best
 
     def _rotation_target_event_ordinal(global_s_now: float) -> Optional[int]:
         """Return the 1-based ordinal of the rotation-domain 'current target' event.
@@ -550,21 +560,31 @@ def simulate_path(
         return int(getattr(last_kf, 'event_ordinal_1b', len(global_keyframes)))
 
     def _active_rotation_limit(key: str, global_s_now: float) -> Optional[float]:
-        """Return active rotation constraint value for the current rotation target event."""
+        """Return the most restrictive rotation constraint (minimum value) for the
+        current rotation target event. If none match, returns None.
+        """
         event_ord_1b = _rotation_target_event_ordinal(global_s_now)
         if event_ord_1b is None or event_ord_1b <= 0:
             return None
+        best: Optional[float] = None
         try:
             for rc in getattr(path, 'ranged_constraints', []) or []:
-                if not isinstance(rc, RangedConstraint):
+                try:
+                    if not isinstance(rc, RangedConstraint):
+                        continue
+                    if rc.key != key:
+                        continue
+                    l = int(getattr(rc, 'start_ordinal', 1))
+                    h = int(getattr(rc, 'end_ordinal', 1))
+                    if int(l) <= int(event_ord_1b) <= int(h):
+                        v = float(getattr(rc, 'value', None))
+                        if v > 0.0:
+                            best = v if (best is None or v < best) else best
+                except Exception:
                     continue
-                if rc.key != key:
-                    continue
-                if int(rc.start_ordinal) <= int(event_ord_1b) <= int(rc.end_ordinal):
-                    return float(rc.value)
         except Exception:
-            pass
-        return None
+            best = None
+        return best
 
     # Ideal end tolerances (always zero for ideal simulation). Use small epsilons internally for numerical robustness.
     end_translation_tolerance_m = 0.0

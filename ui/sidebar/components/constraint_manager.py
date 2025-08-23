@@ -786,7 +786,22 @@ class ConstraintManager(QObject):
                             self.aboutToChange.emit(f"Edit Path Constraint: {label}")
                         except Exception:
                             pass
-                    self._update_single_ranged_constraint_value(key, target_rc, float(v))
+                    # Resolve to the live ranged constraint instance by _ui_instance_id to avoid
+                    # updating a stale deep-copied object after autosave/undo refreshes.
+                    rc_live = target_rc
+                    try:
+                        target_uid = getattr(target_rc, '_ui_instance_id', None)
+                        if target_uid is not None and self.path is not None:
+                            for r in (getattr(self.path, 'ranged_constraints', []) or []):
+                                try:
+                                    if getattr(r, 'key', None) == key and getattr(r, '_ui_instance_id', None) == target_uid:
+                                        rc_live = r
+                                        break
+                                except Exception:
+                                    continue
+                    except Exception:
+                        rc_live = target_rc
+                    self._update_single_ranged_constraint_value(key, rc_live, float(v))
                     if not is_primary:
                         try:
                             self.userActionOccurred.emit(f"Edit Path Constraint: {label}")
