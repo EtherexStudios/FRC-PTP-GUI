@@ -284,21 +284,24 @@ class RotationHandle(QGraphicsEllipseItem):
         self.handle_radius_m = handle_radius_m
         self._dragging: bool = False
         self._syncing: bool = False
-        self.setBrush(QBrush(color))
-        self.setPen(QPen(QColor("#222"), 0.02))
+        # Make the handle invisible but still interactive: fully transparent fill, no pen
+        self.setBrush(QBrush(QColor(0, 0, 0, 0)))
+        self.setPen(Qt.NoPen)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, False)
         self.setZValue(12)
         self._angle_radians: float = 0.0
+        # Remove the visual link line; keep an instance for legacy calls but make it non-drawing
         self.link_line = QGraphicsLineItem()
-        self.link_line.setPen(QPen(QColor("#888"), HANDLE_LINK_THICKNESS_M))
+        self.link_line.setPen(Qt.NoPen)
         self.link_line.setZValue(11)
         self.setRect(-handle_radius_m, -handle_radius_m, handle_radius_m * 2, handle_radius_m * 2)
         self.sync_to_angle()
 
     def scene_items(self) -> List[QGraphicsItem]:
-        return [self.link_line, self]
+        # Only the (invisible) handle participates in the scene; the link line is omitted
+        return [self]
 
     def set_angle(self, radians: float):
         self._angle_radians = radians
@@ -309,10 +312,12 @@ class RotationHandle(QGraphicsEllipseItem):
         try:
             cx, cy = self.center_item.pos().x(), self.center_item.pos().y()
             angle_scene = -self._angle_radians
-            hx = cx + math.cos(angle_scene) * self.handle_distance_m
-            hy = cy + math.sin(angle_scene) * self.handle_distance_m
+            # Place handle at the midpoint of the front (forward-facing) edge of the rectangle
+            front_offset_m = float(self.center_item.rect().width()) * 0.5
+            hx = cx + math.cos(angle_scene) * front_offset_m
+            hy = cy + math.sin(angle_scene) * front_offset_m
             self.setPos(QPointF(hx, hy))
-            self.link_line.setLine(cx, cy, hx, hy)
+            # No link line to update (kept for legacy but non-drawing)
         finally:
             self._syncing = False
 
@@ -323,9 +328,10 @@ class RotationHandle(QGraphicsEllipseItem):
                 cx = self.center_item.pos().x(); cy = self.center_item.pos().y()
                 dx = new_center.x() - cx; dy = new_center.y() - cy
                 angle_scene = math.atan2(dy, dx)
-                hx = cx + math.cos(angle_scene) * self.handle_distance_m
-                hy = cy + math.sin(angle_scene) * self.handle_distance_m
-                self.link_line.setLine(cx, cy, hx, hy)
+                # Constrain movement to the front-edge midpoint radius
+                front_offset_m = float(self.center_item.rect().width()) * 0.5
+                hx = cx + math.cos(angle_scene) * front_offset_m
+                hy = cy + math.sin(angle_scene) * front_offset_m
                 angle_model = -angle_scene
                 self._angle_radians = angle_model
                 if not self._syncing and self._dragging:
