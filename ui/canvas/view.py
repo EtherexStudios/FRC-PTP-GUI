@@ -152,6 +152,14 @@ class CanvasView(QGraphicsView):
             if i >= len(self._handoff_visualizers): continue
             element = self._path.path_elements[i]
             pos = self._element_position_for_index(i)
+            # Do not show handoff radius for the last path element
+            try:
+                if i == len(self._path.path_elements) - 1:
+                    if self._handoff_visualizers[i] is not None:
+                        self.graphics_scene.removeItem(self._handoff_visualizers[i]); self._handoff_visualizers[i].deleteLater(); self._handoff_visualizers[i]=None
+                    continue
+            except Exception:
+                pass
             if kind == 'rotation':
                 if self._handoff_visualizers[i] is not None:
                     self.graphics_scene.removeItem(self._handoff_visualizers[i]); self._handoff_visualizers[i].deleteLater(); self._handoff_visualizers[i]=None
@@ -275,7 +283,8 @@ class CanvasView(QGraphicsView):
                         default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
                         if default_radius and default_radius>0: radius=default_radius
                     except Exception: pass
-                if radius and radius>0:
+                # Skip creating visualizer for the last element
+                if radius and radius>0 and i != len(self._path.path_elements)-1:
                     hv=HandoffRadiusVisualizer(self, QPointF(*pos), radius); self.graphics_scene.addItem(hv); handoff_visualizer=hv
             elif isinstance(element, RotationTarget):
                 kind="rotation"; item = RectElementItem(self, QPointF(*pos), i, filled_color=None, outline_color=QColor('#50c878'), dashed_outline=True, triangle_color=QColor('#50c878'))
@@ -291,7 +300,8 @@ class CanvasView(QGraphicsView):
                         default_radius = self._project_manager.get_default_optional_value('intermediate_handoff_radius_meters')
                         if default_radius and default_radius>0: radius=default_radius
                     except Exception: pass
-                if radius and radius>0:
+                # Skip creating visualizer for the last element
+                if radius and radius>0 and i != len(self._path.path_elements)-1:
                     hv=HandoffRadiusVisualizer(self, QPointF(*pos), radius); self.graphics_scene.addItem(hv); handoff_visualizer=hv
             else:
                 continue
