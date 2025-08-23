@@ -43,6 +43,8 @@ class ConstraintManager(QObject):
         # Track previous slider values to detect and block overlapping moves
         self._slider_prev_values: Dict[RangeSlider, Tuple[int,int]] = {}
         self._enforcing_slider_constraints: bool = False
+        # Unique id assignment for ranged constraint instances to survive deep copies
+        self._rc_uid_seq: int = 1
         
     def set_path(self, path: Path):
         """Set the path to manage constraints for."""
@@ -446,6 +448,30 @@ class ConstraintManager(QObject):
 
         # Helper to create slider/spinner pair for given instance index
         def _make_slider_for_instance(instance_index: int, rc_obj):
+            # Ensure a stable UI id on the ranged constraint; deep copies preserve attributes
+            try:
+                uid = getattr(rc_obj, '_ui_instance_id', None)
+                if uid is None:
+                    setattr(rc_obj, '_ui_instance_id', int(self._rc_uid_seq))
+                    uid = int(self._rc_uid_seq)
+                    self._rc_uid_seq += 1
+            except Exception:
+                uid = None
+
+            def _resolve_current_rc():
+                try:
+                    if self.path is None:
+                        return None
+                    target_uid = getattr(rc_obj, '_ui_instance_id', None)
+                    for r in (getattr(self.path, 'ranged_constraints', []) or []):
+                        try:
+                            if getattr(r, 'key', None) == key and getattr(r, '_ui_instance_id', None) == target_uid:
+                                return r
+                        except Exception:
+                            continue
+                except Exception:
+                    return None
+                return None
             # Determine low/high from model
             low_i_model = int(getattr(rc_obj, 'start_ordinal', 1))
             high_i_model = int(getattr(rc_obj, 'end_ordinal', total))
@@ -473,6 +499,15 @@ class ConstraintManager(QObject):
                 end1 = max(1, min(int(h - 1), int(total)))
                 self._active_preview_key = key
                 self.constraintRangePreviewRequested.emit(key, start1, end1)
+                # Live-apply previewed range to the model so simulation can rebuild in real time
+                try:
+                    rc_live = _resolve_current_rc()
+                    if rc_live is None:
+                        rc_live = rc_obj
+                    rc_live.start_ordinal = int(start1)
+                    rc_live.end_ordinal = int(end1)
+                except Exception:
+                    pass
                 # Accept move; update previous
                 self._slider_prev_values[sld] = (int(l), int(h))
 
@@ -495,8 +530,11 @@ class ConstraintManager(QObject):
                 except Exception:
                     pass
                 try:
-                    rc_obj.start_ordinal = start1
-                    rc_obj.end_ordinal = end1
+                    rc_live = _resolve_current_rc()
+                    if rc_live is None:
+                        rc_live = rc_obj
+                    rc_live.start_ordinal = int(start1)
+                    rc_live.end_ordinal = int(end1)
                 except Exception:
                     pass
                 self.constraintRangeChanged.emit(key, start1, end1)

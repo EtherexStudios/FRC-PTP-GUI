@@ -99,6 +99,7 @@ class _Segment:
 class _GlobalRotationKeyframe:
     s_m: float
     theta_target: float
+    event_ordinal_1b: int
     profiled_rotation: bool = True
 
 
@@ -226,6 +227,7 @@ def _build_global_rotation_keyframes(
 
     global_frames: List[_GlobalRotationKeyframe] = []
 
+    rot_event_ord = 0  # 1-based ordinal over rotation-bearing events in path order
     for idx, elem in enumerate(path.path_elements):
         if isinstance(elem, RotationTarget):
             prev_anchor_ord: Optional[int] = None
@@ -251,11 +253,12 @@ def _build_global_rotation_keyframes(
             theta = float(elem.rotation_radians)
             profiled = getattr(elem, "profiled_rotation", True)
             s_at = s0 + t_ratio * seg_span
+            rot_event_ord += 1
             print(
                 f"DEBUG: Global RotationTarget at s={s_at:.3f} m (prev={prev_anchor_ord}, next={next_anchor_ord}, t={t_ratio:.2f}), "
-                f"theta={math.degrees(theta):.1f}°, profiled={profiled}"
+                f"theta={math.degrees(theta):.1f}°, profiled={profiled}, event_ord={rot_event_ord}"
             )
-            global_frames.append(_GlobalRotationKeyframe(s_at, theta, profiled))
+            global_frames.append(_GlobalRotationKeyframe(s_at, theta, rot_event_ord, profiled))
         elif isinstance(elem, Waypoint):
             this_anchor_ord = path_idx_to_anchor_ord.get(idx)
             if this_anchor_ord is None:
@@ -264,11 +267,12 @@ def _build_global_rotation_keyframes(
             theta = float(rt.rotation_radians)
             profiled = getattr(rt, "profiled_rotation", True)
             s_at = cumulative_lengths[this_anchor_ord]
+            rot_event_ord += 1
             print(
                 f"DEBUG: Global Waypoint rotation at s={s_at:.3f} m (anchor={this_anchor_ord}), "
-                f"theta={math.degrees(theta):.1f}°, profiled={profiled}"
+                f"theta={math.degrees(theta):.1f}°, profiled={profiled}, event_ord={rot_event_ord}"
             )
-            global_frames.append(_GlobalRotationKeyframe(s_at, theta, profiled))
+            global_frames.append(_GlobalRotationKeyframe(s_at, theta, rot_event_ord, profiled))
 
     if not global_frames:
         return []
@@ -521,18 +525,34 @@ def simulate_path(
             pass
         return None
 
-    def _active_rotation_limit(key: str, global_s_now: float) -> Optional[float]:
-        """Return active rotation constraint value based on the next rotation event ordinal ahead of s."""
-        # global_keyframes will be initialized after cumulative_lengths is computed
+    def _rotation_target_event_ordinal(global_s_now: float) -> Optional[int]:
+        """Return the 1-based ordinal of the rotation-domain 'current target' event.
+        - Before an event: that event
+        - Exactly at an event: the next event if it exists, otherwise this event
+        - After the last event: the last event
+        """
         if not global_keyframes:
             return None
-        # Find next event ahead (first with s >= current s)
-        next_ord: Optional[int] = None
+        tol_s = 1e-6
+        n = len(global_keyframes)
         for i, kf in enumerate(global_keyframes):
-            if kf.s_m >= global_s_now - 1e-9:
-                next_ord = i + 1  # 1-based
-                break
-        if next_ord is None:
+            if global_s_now < kf.s_m - tol_s:
+                return int(getattr(kf, 'event_ordinal_1b', i + 1))
+            if abs(global_s_now - kf.s_m) <= tol_s:
+                # At an event: switch immediately to next if available
+                if i + 1 < n:
+                    next_kf = global_keyframes[i + 1]
+                    return int(getattr(next_kf, 'event_ordinal_1b', i + 2))
+                # No next event; continue using this event
+                return int(getattr(kf, 'event_ordinal_1b', i + 1))
+        # After the last event
+        last_kf = global_keyframes[-1]
+        return int(getattr(last_kf, 'event_ordinal_1b', len(global_keyframes)))
+
+    def _active_rotation_limit(key: str, global_s_now: float) -> Optional[float]:
+        """Return active rotation constraint value for the current rotation target event."""
+        event_ord_1b = _rotation_target_event_ordinal(global_s_now)
+        if event_ord_1b is None or event_ord_1b <= 0:
             return None
         try:
             for rc in getattr(path, 'ranged_constraints', []) or []:
@@ -540,17 +560,17 @@ def simulate_path(
                     continue
                 if rc.key != key:
                     continue
-                if int(rc.start_ordinal) <= int(next_ord) <= int(rc.end_ordinal):
+                if int(rc.start_ordinal) <= int(event_ord_1b) <= int(rc.end_ordinal):
                     return float(rc.value)
         except Exception:
             pass
         return None
 
-    # Ideal end tolerances (zero). Use small epsilons internally for numerical robustness.
+    # Ideal end tolerances (always zero for ideal simulation). Use small epsilons internally for numerical robustness.
     end_translation_tolerance_m = 0.0
     end_rotation_tolerance_rad = 0.0
-    _EPS_POS = 1e-6
-    _EPS_ANG = 1e-6
+    _EPS_POS = 1e-3
+    _EPS_ANG = 1e-3
 
     # Default handoff radius from config
     default_handoff_radius = _resolve_constraint(None, cfg.get("intermediate_handoff_radius_meters"), 0.05)
@@ -592,8 +612,34 @@ def simulate_path(
             rem += max(segments[k].length_m, 0.0)
         return rem
 
-    # Use base_max_v for guard time heuristic
-    guard_time = max(25.0, (total_path_len / max(0.5, base_max_v)) * 5.0)
+    # Compute a realistic guard time using the slowest effective speed limits (including ranged constraints)
+    min_trans_v = float(base_max_v)
+    min_rot_omega_deg = math.degrees(float(base_max_omega))
+    try:
+        for rc in getattr(path, 'ranged_constraints', []) or []:
+            if not isinstance(rc, RangedConstraint):
+                continue
+            if rc.key == 'max_velocity_meters_per_sec':
+                try:
+                    val = float(rc.value)
+                    if val > 0.0:
+                        min_trans_v = min(min_trans_v, val)
+                except Exception:
+                    pass
+            elif rc.key == 'max_velocity_deg_per_sec':
+                try:
+                    val = float(rc.value)
+                    if val > 0.0:
+                        min_rot_omega_deg = min(min_rot_omega_deg, val)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    min_rot_omega = math.radians(max(1e-3, min_rot_omega_deg))
+    min_trans_v = max(0.1, min_trans_v)
+    est_trans_time = total_path_len / min_trans_v
+    est_rot_time = math.pi / min_rot_omega  # enough for 180° worst-case
+    guard_time = max(3.0, 2.0 * est_trans_time + 1.5 * est_rot_time)
 
     while t_s <= guard_time:
         if seg_idx >= len(segments):
@@ -671,12 +717,13 @@ def simulate_path(
         max_a_mag = min(max_a, max_a_dyn)
 
         v_allow_decel = math.sqrt(2.0 * max_a_mag * remaining)
-        v_max_accel = v_curr + max_a_mag * dt_s
-        v_min_decel = max(0.0, v_curr - max_a_mag * dt_s)
-
+        # First cap by velocity and distance-based decel constraint; leave acceleration limiting to the limiter below
         unconstrained_v_des = min(max_v, max_v_dyn, v_allow_decel)
-
-        v_des_scalar = max(v_min_decel, min(v_max_accel, unconstrained_v_des))
+        v_des_scalar = max(0.0, unconstrained_v_des)
+        # If on the final segment and desired velocity collapses to ~0 while still away from the endpoint,
+        # nudge toward the endpoint by requesting just enough velocity to reach it within one dt (bounded by max_v).
+        if seg_idx == len(segments) - 1 and v_des_scalar <= 1e-9 and dist_to_target > _EPS_POS:
+            v_des_scalar = min(max_v, dist_to_target / max(dt_s, 1e-9))
 
         vx_des = v_des_scalar * ux
         vy_des = v_des_scalar * uy
@@ -714,6 +761,8 @@ def simulate_path(
             if hypot2(step_dx, step_dy) >= max(0.0, dist_to_target - _EPS_POS):
                 x = end_x
                 y = end_y
+                # Once at final position, zero translational components to avoid endless micro-stepping
+                limited = ChassisSpeeds(0.0, 0.0, limited.omega_radps)
             else:
                 x += step_dx
                 y += step_dy
@@ -735,20 +784,32 @@ def simulate_path(
         dist_to_final = hypot2(dx_end, dy_end)
         rot_err = abs(shortest_angular_distance(end_heading_target, theta))
 
-        snapped = False
+        snapped_pos = False
+        snapped_rot = False
         if dist_to_final <= _EPS_POS:
             x = end_x
             y = end_y
             dist_to_final = 0.0
-            snapped = True
+            snapped_pos = True
         if rot_err <= _EPS_ANG:
             theta = end_heading_target
             rot_err = 0.0
-            snapped = True
+            snapped_rot = True
 
-        if snapped:
+        if snapped_pos or snapped_rot:
             poses_by_time[t_key] = (float(x), float(y), float(theta))
             trail_points[-1] = (float(x), float(y))
+            # Zero corresponding velocities after snapping to avoid dithering away from the target
+            if snapped_pos:
+                limited = ChassisSpeeds(0.0, 0.0, limited.omega_radps)
+                speeds = ChassisSpeeds(0.0, 0.0, speeds.omega_radps)
+            if snapped_rot:
+                limited = ChassisSpeeds(limited.vx_mps, limited.vy_mps, 0.0)
+                speeds = ChassisSpeeds(speeds.vx_mps, speeds.vy_mps, 0.0)
+            # If both snapped this step, we are exactly at the final state; terminate immediately
+            if snapped_pos and snapped_rot:
+                speeds = ChassisSpeeds(0.0, 0.0, 0.0)
+                break
 
         if dist_to_final <= end_translation_tolerance_m and rot_err <= end_rotation_tolerance_rad:
             speeds = ChassisSpeeds(0.0, 0.0, 0.0)
