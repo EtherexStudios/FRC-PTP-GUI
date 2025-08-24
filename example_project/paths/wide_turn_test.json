@@ -56,12 +56,6 @@
       }
     },
     {
-      "type": "translation",
-      "x_meters": 3.136070609182194,
-      "y_meters": 4.480828125640065,
-      "intermediate_handoff_radius_meters": 0.25
-    },
-    {
       "type": "waypoint",
       "translation_target": {
         "x_meters": 3.1794652237164693,
