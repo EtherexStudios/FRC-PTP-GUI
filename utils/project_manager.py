@@ -369,10 +369,6 @@ class ProjectManager:
                 val = getattr(c, name, None)
                 if val is not None:
                     constraints_obj[name] = float(val)
-        # Compose top-level JSON object with constraints first
-        result: Dict[str, Any] = {}
-        if constraints_obj:
-            result["constraints"] = constraints_obj
         # Ranged constraints block (grouped by type/key)
         ranged_grouped: Dict[str, List[Dict[str, Any]]] = {}
         try:
@@ -404,8 +400,16 @@ class ProjectManager:
                 ranged_grouped.setdefault(str(rc.key), []).append(entry)
         except Exception:
             ranged_grouped = {}
+        # Merge ranged constraints under the single "constraints" object
+        # Each ranged-capable key will store a list of range entries under its key
         if ranged_grouped:
-            result["ranged_constraints"] = ranged_grouped
+            for k, arr in ranged_grouped.items():
+                constraints_obj[k] = arr
+
+        # Compose top-level JSON object with unified constraints
+        result: Dict[str, Any] = {}
+        if constraints_obj:
+            result["constraints"] = constraints_obj
         result["path_elements"] = items
         return result
 
@@ -431,7 +435,21 @@ class ProjectManager:
                     if name in constraints_block:
                         setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))
             # Defer ranged constraints parsing until after path elements are loaded
-            ranged_block = data.get("ranged_constraints", []) or []
+            # Unify: allow ranged constraints to be provided under constraints[key] as a list
+            ranged_block_list: List[Dict[str, Any]] = []
+            # From unified constraints block
+            try:
+                if isinstance(constraints_block, dict):
+                    for k, v in constraints_block.items():
+                        if isinstance(v, list):
+                            for entry in v:
+                                if isinstance(entry, dict):
+                                    e2 = dict(entry)
+                                    e2["key"] = k
+                                    ranged_block_list.append(e2)
+            except Exception:
+                pass
+            ranged_block = ranged_block_list
             items = data.get("path_elements", []) if isinstance(data.get("path_elements", []), list) else []
         # Load path elements
         # First pass: create elements (support both new and legacy formats)

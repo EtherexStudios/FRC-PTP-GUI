@@ -1,5 +1,5 @@
 {
-  "ranged_constraints": {
+  "constraints": {
     "max_velocity_meters_per_sec": [
       {
         "value": 1.0,
