@@ -13,25 +13,26 @@ from models.path_model import Path, PathElement, RotationTarget, TranslationTarg
 DEFAULT_CONFIG: Dict[str, float] = {
     "robot_length_meters": 0.5,
     "robot_width_meters": 0.5,
-    "max_velocity_meters_per_sec": 4.5,
-    "max_acceleration_meters_per_sec2": 7.0,
-    "intermediate_handoff_radius_meters": 0.2,
-    "max_velocity_deg_per_sec": 720.0,
-    "max_acceleration_deg_per_sec2": 1500.0,
-    "end_translation_tolerance_meters": 0.03,
-    "end_rotation_tolerance_deg": 2.0
+    # Defaults for constraints and other tunables
+    "default_max_velocity_meters_per_sec": 4.5,
+    "default_max_acceleration_meters_per_sec2": 7.0,
+    "default_intermediate_handoff_radius_meters": 0.2,
+    "default_max_velocity_deg_per_sec": 720.0,
+    "default_max_acceleration_deg_per_sec2": 1500.0,
+    "default_end_translation_tolerance_meters": 0.03,
+    "default_end_rotation_tolerance_deg": 2.0
 }
 
 EXAMPLE_CONFIG: Dict[str, float] = {
     "robot_length_meters": 0.5,
     "robot_width_meters": 0.5,
-    "max_velocity_meters_per_sec": 4.5,
-    "max_acceleration_meters_per_sec2": 7.0,
-    "intermediate_handoff_radius_meters": 0.2,
-    "max_velocity_deg_per_sec": 720.0,
-    "max_acceleration_deg_per_sec2": 1500.0,
-    "end_translation_tolerance_meters": 0.03,
-    "end_rotation_tolerance_deg": 2.0
+    "default_max_velocity_meters_per_sec": 4.5,
+    "default_max_acceleration_meters_per_sec2": 7.0,
+    "default_intermediate_handoff_radius_meters": 0.2,
+    "default_max_velocity_deg_per_sec": 720.0,
+    "default_max_acceleration_deg_per_sec2": 1500.0,
+    "default_end_translation_tolerance_meters": 0.03,
+    "default_end_rotation_tolerance_deg": 2.0
 }
 
 
@@ -181,7 +182,10 @@ class ProjectManager:
 
     def get_default_optional_value(self, key: str) -> Optional[float]:
         # Returns configured default if present, else None
-        value = self.config.get(key)
+        # Prefer "default_"-prefixed key, fallback to raw key for legacy or special cases
+        value = self.config.get(f"default_{key}")
+        if value is None:
+            value = self.config.get(key)
         try:
             return float(value) if value is not None else None
         except (TypeError, ValueError):
