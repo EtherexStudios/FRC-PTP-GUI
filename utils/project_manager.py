@@ -429,12 +429,12 @@ class ProjectManager:
             constraints_block = data.get("constraints", {}) or {}
             if isinstance(constraints_block, dict) and hasattr(path, 'constraints') and path.constraints is not None:
                 for name in [
-                    "max_velocity_meters_per_sec",
-                    "max_acceleration_meters_per_sec2",
-                    "end_translation_tolerance_meters",
-                    "max_velocity_deg_per_sec",
-                    "max_acceleration_deg_per_sec2",
-                    "end_rotation_tolerance_deg",
+                    "default_max_velocity_meters_per_sec",
+                    "default_max_acceleration_meters_per_sec2",
+                    "default_end_translation_tolerance_meters",
+                    "default_max_velocity_deg_per_sec",
+                    "default_max_acceleration_deg_per_sec2",
+                    "default_end_rotation_tolerance_deg",
                 ]:
                     if name in constraints_block:
                         setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))

@@ -505,11 +505,11 @@ def simulate_path(
         return SimResult(poses_by_time=poses_by_time, times_sorted=times_sorted, total_time_s=0.0, trail_points=trail_points)
 
     c = getattr(path, "constraints", None)
-    base_max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("max_velocity_meters_per_sec"), 3.0)
-    base_max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("max_acceleration_meters_per_sec2"), 2.5)
+    base_max_v = _resolve_constraint(getattr(c, "max_velocity_meters_per_sec", None), cfg.get("default_max_velocity_meters_per_sec"), 3.0)
+    base_max_a = _resolve_constraint(getattr(c, "max_acceleration_meters_per_sec2", None), cfg.get("default_max_acceleration_meters_per_sec2"), 2.5)
 
-    base_max_omega = math.radians(_resolve_constraint(getattr(c, "max_velocity_deg_per_sec", None), cfg.get("max_velocity_deg_per_sec"), 180.0))
-    base_max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("max_acceleration_deg_per_sec2"), 360.0))
+    base_max_omega = math.radians(_resolve_constraint(getattr(c, "max_velocity_deg_per_sec", None), cfg.get("default_max_velocity_deg_per_sec"), 180.0))
+    base_max_alpha = math.radians(_resolve_constraint(getattr(c, "max_acceleration_deg_per_sec2", None), cfg.get("default_max_acceleration_deg_per_sec2"), 360.0))
     
     def _active_translation_limit(key: str, next_anchor_ord: int) -> Optional[float]:
         """Return the most restrictive translation constraint (minimum value) active
@@ -593,7 +593,7 @@ def simulate_path(
     _EPS_ANG = 1e-3
 
     # Default handoff radius from config
-    default_handoff_radius = _resolve_constraint(None, cfg.get("intermediate_handoff_radius_meters"), 0.05)
+    default_handoff_radius = _resolve_constraint(None, cfg.get("default_intermediate_handoff_radius_meters"), 0.05)
 
     total_path_len = 0.0
     cumulative_lengths: List[float] = [0.0]

@@ -152,13 +152,13 @@ class ConfigDialog(QDialog):
         add_spin("robot_width_meters", "Robot Width (m)", cfg.get("robot_width_meters", 0.60) or 0.60, (0.05, 5.0), 0.01)
 
         # Optional defaults
-        add_spin("max_velocity_meters_per_sec", "Default Max Velocity (m/s)", float(cfg.get("max_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 99999.0), 0.1)
-        add_spin("max_acceleration_meters_per_sec2", "Default Max Accel (m/s²)", float(cfg.get("max_acceleration_meters_per_sec2", 0.0) or 0.0), (0.0, 99999.0), 0.1)
-        add_spin("intermediate_handoff_radius_meters", "Default Handoff Radius (m)", float(cfg.get("intermediate_handoff_radius_meters", 0.0) or 0.0), (0.0, 99999.0), 0.05)
-        add_spin("max_velocity_deg_per_sec", "Default Max Rot Vel (deg/s)", float(cfg.get("max_velocity_deg_per_sec", 0.0) or 0.0), (0.0, 99999.0), 1.0)
-        add_spin("max_acceleration_deg_per_sec2", "Default Max Rot Accel (deg/s²)", float(cfg.get("max_acceleration_deg_per_sec2", 0.0) or 0.0), (0.0, 99999.0), 1.0)
-        add_spin("end_translation_tolerance_meters", "End Translation Tolerance (m)", float(cfg.get("end_translation_tolerance_meters", 0.05) or 0.05), (0.0, 1.0), 0.01)
-        add_spin("end_rotation_tolerance_deg", "End Rotation Tolerance (deg)", float(cfg.get("end_rotation_tolerance_deg", 2.0) or 2.0), (0.0, 180.0), 0.1)
+        add_spin("default_max_velocity_meters_per_sec", "Default Max Velocity (m/s)", float(cfg.get("default_max_velocity_meters_per_sec", 0.0) or 0.0), (0.0, 99999.0), 0.1)
+        add_spin("default_max_acceleration_meters_per_sec2", "Default Max Accel (m/s²)", float(cfg.get("default_max_acceleration_meters_per_sec2", 0.0) or 0.0), (0.0, 99999.0), 0.1)
+        add_spin("default_intermediate_handoff_radius_meters", "Default Handoff Radius (m)", float(cfg.get("default_intermediate_handoff_radius_meters", 0.0) or 0.0), (0.0, 99999.0), 0.05)
+        add_spin("default_max_velocity_deg_per_sec", "Default Max Rot Vel (deg/s)", float(cfg.get("default_max_velocity_deg_per_sec", 0.0) or 0.0), (0.0, 99999.0), 1.0)
+        add_spin("default_max_acceleration_deg_per_sec2", "Default Max Rot Accel (deg/s²)", float(cfg.get("default_max_acceleration_deg_per_sec2", 0.0) or 0.0), (0.0, 99999.0), 1.0)
+        add_spin("default_end_translation_tolerance_meters", "End Translation Tolerance (m)", float(cfg.get("default_end_translation_tolerance_meters", 0.05) or 0.05), (0.0, 1.0), 0.01)
+        add_spin("default_end_rotation_tolerance_deg", "End Rotation Tolerance (deg)", float(cfg.get("default_end_rotation_tolerance_deg", 2.0) or 2.0), (0.0, 180.0), 0.1)
 
         # Buttons styled to fit dark UI
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, orientation=Qt.Horizontal, parent=self)
