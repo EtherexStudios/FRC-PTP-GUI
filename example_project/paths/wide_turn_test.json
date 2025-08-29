@@ -39,6 +39,12 @@
     },
     {
       "type": "translation",
+      "x_meters": 1.20437699189082,
+      "y_meters": 0.8603650408475083,
+      "intermediate_handoff_radius_meters": 0.25
+    },
+    {
+      "type": "translation",
       "x_meters": 2.9524771802629544,
       "y_meters": 3.0601019586041796,
       "intermediate_handoff_radius_meters": 0.25

@@ -811,26 +811,32 @@ class ConstraintManager(QObject):
             spinbox.valueChanged.connect(_make_value_handler(rc_obj, idx == 0))
 
             # While interacting with the spinbox, also show the corresponding range preview
+            def _emit_preview_for_spinbox(instance_idx=idx):
+                """Emit preview signal for spinbox changes."""
+                # Find the correct constraint instance for this spinbox
+                # Use the instance index and key to identify the correct constraint
+                if self.path is None:
+                    return
+
+                ranged_constraints = getattr(self.path, 'ranged_constraints', []) or []
+                matching_constraints = [rc for rc in ranged_constraints if getattr(rc, 'key', None) == key]
+
+                if instance_idx < len(matching_constraints):
+                    rc_live = matching_constraints[instance_idx]
+                else:
+                    # Fallback to the original rc_obj
+                    rc_live = rc_obj
+
+                # Use the actual constraint ordinals for preview
+                start_ord = max(1, min(int(getattr(rc_live, 'start_ordinal', 1)), int(total)))
+                end_ord = max(1, min(int(getattr(rc_live, 'end_ordinal', total)), int(total)))
+
+                self._active_preview_key = key
+                self.constraintRangePreviewRequested.emit(key, start_ord, end_ord)
+
             try:
-                spinbox.valueChanged.connect(lambda _v, _sld=sld, _key=key, _total=total: (
-                    setattr(self, '_active_preview_key', _key),
-                    (lambda l_h: self.constraintRangePreviewRequested.emit(
-                        _key,
-                        max(1, min(int(l_h[0]), int(_total))),
-                        max(1, min(int(l_h[1] - 1), int(_total)))
-                    ))(_sld.values())
-                ))
-            except Exception:
-                pass
-            try:
-                spinbox.editingFinished.connect(lambda _sld=sld, _key=key, _total=total: (
-                    setattr(self, '_active_preview_key', _key),
-                    (lambda l_h: self.constraintRangePreviewRequested.emit(
-                        _key,
-                        max(1, min(int(l_h[0]), int(_total))),
-                        max(1, min(int(l_h[1] - 1), int(_total)))
-                    ))(_sld.values())
-                ))
+                spinbox.valueChanged.connect(lambda _v, i=idx: _emit_preview_for_spinbox(i))
+                spinbox.editingFinished.connect(lambda i=idx: _emit_preview_for_spinbox(i))
             except Exception:
                 pass
 
@@ -894,14 +900,26 @@ class ConstraintManager(QObject):
                 orig_focus_in = spinbox.focusInEvent
             except Exception:
                 orig_focus_in = None
-            def _focus_in(ev, _sld=sld, _key=key, _total=total, _spin=spinbox, _orig=orig_focus_in):
+            def _focus_in(ev, _spin=spinbox, _orig=orig_focus_in, instance_idx=idx):
                 try:
-                    l, h = _sld.values()
-                    # Map slider handles (1..total+1) -> model ordinals (1..total)
-                    start1 = max(1, min(int(l), int(_total)))
-                    end1 = max(1, min(int(h - 1), int(_total)))
-                    self._active_preview_key = _key
-                    self.constraintRangePreviewRequested.emit(_key, start1, end1)
+                    # Find the correct constraint instance for this spinbox
+                    if self.path is None:
+                        return
+
+                    ranged_constraints = getattr(self.path, 'ranged_constraints', []) or []
+                    matching_constraints = [rc for rc in ranged_constraints if getattr(rc, 'key', None) == key]
+
+                    if instance_idx < len(matching_constraints):
+                        rc_live = matching_constraints[instance_idx]
+                    else:
+                        rc_live = rc_obj
+
+                    # Use the actual constraint ordinals for preview
+                    start_ord = max(1, min(int(getattr(rc_live, 'start_ordinal', 1)), int(total)))
+                    end_ord = max(1, min(int(getattr(rc_live, 'end_ordinal', total)), int(total)))
+
+                    self._active_preview_key = key
+                    self.constraintRangePreviewRequested.emit(key, start_ord, end_ord)
                 except Exception:
                     pass
                 try:
@@ -934,13 +952,26 @@ class ConstraintManager(QObject):
                         except Exception:
                             pass
                         return False
-                def _emit_preview_from_spin():
+                def _emit_preview_from_spin(instance_idx=idx):
                     try:
-                        l, h = sld.values()
-                        start1 = max(1, min(int(l), int(total)))
-                        end1 = max(1, min(int(h - 1), int(total)))
+                        # Find the correct constraint instance for this spinbox
+                        if self.path is None:
+                            return
+
+                        ranged_constraints = getattr(self.path, 'ranged_constraints', []) or []
+                        matching_constraints = [rc for rc in ranged_constraints if getattr(rc, 'key', None) == key]
+
+                        if instance_idx < len(matching_constraints):
+                            rc_live = matching_constraints[instance_idx]
+                        else:
+                            rc_live = rc_obj
+
+                        # Use the actual constraint ordinals for preview
+                        start_ord = max(1, min(int(getattr(rc_live, 'start_ordinal', 1)), int(total)))
+                        end_ord = max(1, min(int(getattr(rc_live, 'end_ordinal', total)), int(total)))
+
                         self._active_preview_key = key
-                        self.constraintRangePreviewRequested.emit(key, start1, end1)
+                        self.constraintRangePreviewRequested.emit(key, start_ord, end_ord)
                     except Exception:
                         pass
                 filt = SpinboxPreviewFilter(_emit_preview_from_spin)

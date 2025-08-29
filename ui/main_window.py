@@ -189,7 +189,8 @@ class MainWindow(QMainWindow):
                                 pl = self.sidebar.points_list
                                 curr = widget
                                 steps = 0
-                                while curr is not None and steps < 48:
+                                max_steps = 100  # Reasonable limit to prevent infinite loops
+                                while curr is not None and steps < max_steps:
                                     if curr is pl:
                                         return False
                                     curr = curr.parent() if hasattr(curr, 'parent') else None
@@ -199,7 +200,8 @@ class MainWindow(QMainWindow):
                         if hasattr(self.sidebar, 'is_widget_range_related') and callable(self.sidebar.is_widget_range_related):
                             curr = widget
                             steps = 0
-                            while curr is not None and steps < 48:
+                            max_steps = 100  # Reasonable limit to prevent infinite loops
+                            while curr is not None and steps < max_steps:
                                 if self.sidebar.is_widget_range_related(curr):
                                     return True
                                 curr = curr.parent() if hasattr(curr, 'parent') else None
@@ -1127,8 +1129,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_path(self.path)
         # Update the current path display
         self._update_current_path_display()
-        # Save immediately to ensure file exists
-        self._schedule_autosave()
+        # Only autosave if this is a new path being created, not when loading existing paths
+        # The autosave will be triggered by user actions (modelChanged, modelStructureChanged, etc.)
         # New path -> rebuild simulation
         self.canvas.request_simulation_rebuild()
 
