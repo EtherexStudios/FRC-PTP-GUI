@@ -635,7 +635,6 @@ class Sidebar(QWidget):
                 
         except Exception as e:
             # Fail safe: keep UI alive
-            print(f"Sidebar selection error: {e}")
             self.hide_spinners()
             
     def _expose_element(self, element):

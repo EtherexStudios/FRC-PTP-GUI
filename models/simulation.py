@@ -157,8 +157,6 @@ def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float
             t_ratio = 0.0 if t_ratio < 0.0 else 1.0 if t_ratio > 1.0 else t_ratio
             theta = float(elem.rotation_radians)
             profiled = getattr(elem, "profiled_rotation", True)
-            # DEBUG: Print rotation target properties
-            print(f"DEBUG: RotationTarget at t_ratio={t_ratio:.2f}, theta={math.degrees(theta):.1f}°, profiled={profiled}")
             segments[prev_anchor_ord].keyframes.append(_RotationKeyframe(t_ratio, theta, profiled))
         elif isinstance(elem, Waypoint):
             rt = elem.rotation_target
@@ -176,8 +174,6 @@ def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float
             if this_anchor_ord < len(segments):
                 theta = float(rt.rotation_radians)
                 profiled = getattr(rt, "profiled_rotation", True)
-                # DEBUG: Print waypoint rotation properties
-                print(f"DEBUG: Waypoint rotation at start: theta={math.degrees(theta):.1f}°, profiled={profiled}")
                 segments[this_anchor_ord].keyframes.append(_RotationKeyframe(0.0, theta, profiled))
             
             # Also add to the previous segment with t_ratio = 1.0 if it exists
@@ -185,8 +181,6 @@ def _build_segments(path: Path) -> Tuple[List[_Segment], List[Tuple[float, float
             if this_anchor_ord > 0:
                 theta = float(rt.rotation_radians)
                 profiled = getattr(rt, "profiled_rotation", True)
-                # DEBUG: Print waypoint rotation properties
-                print(f"DEBUG: Waypoint rotation at end: theta={math.degrees(theta):.1f}°, profiled={profiled}")
                 segments[this_anchor_ord - 1].keyframes.append(_RotationKeyframe(1.0, theta, profiled))
 
     for seg in segments:
@@ -254,10 +248,6 @@ def _build_global_rotation_keyframes(
             profiled = getattr(elem, "profiled_rotation", True)
             s_at = s0 + t_ratio * seg_span
             rot_event_ord += 1
-            print(
-                f"DEBUG: Global RotationTarget at s={s_at:.3f} m (prev={prev_anchor_ord}, next={next_anchor_ord}, t={t_ratio:.2f}), "
-                f"theta={math.degrees(theta):.1f}°, profiled={profiled}, event_ord={rot_event_ord}"
-            )
             global_frames.append(_GlobalRotationKeyframe(s_at, theta, rot_event_ord, profiled))
         elif isinstance(elem, Waypoint):
             this_anchor_ord = path_idx_to_anchor_ord.get(idx)
@@ -268,10 +258,6 @@ def _build_global_rotation_keyframes(
             profiled = getattr(rt, "profiled_rotation", True)
             s_at = cumulative_lengths[this_anchor_ord]
             rot_event_ord += 1
-            print(
-                f"DEBUG: Global Waypoint rotation at s={s_at:.3f} m (anchor={this_anchor_ord}), "
-                f"theta={math.degrees(theta):.1f}°, profiled={profiled}, event_ord={rot_event_ord}"
-            )
             global_frames.append(_GlobalRotationKeyframe(s_at, theta, rot_event_ord, profiled))
 
     if not global_frames:

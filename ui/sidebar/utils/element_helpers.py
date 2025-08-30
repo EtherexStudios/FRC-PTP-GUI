@@ -7,6 +7,16 @@ from ui.canvas import ELEMENT_CIRCLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_REC
 from .constants import SPINNER_METADATA
 
 
+def get_translation_position(element: Any) -> Tuple[float, float]:
+    """Get the translation position (x, y) from a TranslationTarget or Waypoint element."""
+    if isinstance(element, TranslationTarget):
+        return float(element.x_meters), float(element.y_meters)
+    elif isinstance(element, Waypoint):
+        return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+    else:
+        return 0.0, 0.0
+
+
 def clamp_from_metadata(key: str, value: float) -> float:
     """Clamp a value based on metadata range constraints."""
     meta = SPINNER_METADATA.get(key, {})
@@ -22,10 +32,8 @@ def clamp_from_metadata(key: str, value: float) -> float:
 
 def get_element_position(element: Any, idx: int, path_elements: List[Any]) -> Tuple[float, float]:
     """Return model-space center position for an element."""
-    if isinstance(element, TranslationTarget):
-        return float(element.x_meters), float(element.y_meters)
-    if isinstance(element, Waypoint):
-        return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+    if isinstance(element, (TranslationTarget, Waypoint)):
+        return get_translation_position(element)
     if isinstance(element, RotationTarget):
         prev_pos, next_pos = get_neighbor_positions(idx, path_elements)
         if prev_pos is None or next_pos is None:
@@ -50,21 +58,15 @@ def get_neighbor_positions(idx: int, path_elements: List[Any]) -> Tuple[Optional
     prev_pos = None
     for i in range(idx - 1, -1, -1):
         e = path_elements[i]
-        if isinstance(e, TranslationTarget):
-            prev_pos = (float(e.x_meters), float(e.y_meters))
-            break
-        if isinstance(e, Waypoint):
-            prev_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+        if isinstance(e, (TranslationTarget, Waypoint)):
+            prev_pos = get_translation_position(e)
             break
     # next
     next_pos = None
     for i in range(idx + 1, len(path_elements)):
         e = path_elements[i]
-        if isinstance(e, TranslationTarget):
-            next_pos = (float(e.x_meters), float(e.y_meters))
-            break
-        if isinstance(e, Waypoint):
-            next_pos = (float(e.translation_target.x_meters), float(e.translation_target.y_meters))
+        if isinstance(e, (TranslationTarget, Waypoint)):
+            next_pos = get_translation_position(e)
             break
     return prev_pos, next_pos
 
@@ -130,6 +132,6 @@ def get_safe_position_for_rotation(rotation_target, elems, index) -> Tuple[float
     
     # If no nearby position found, use a reasonable default
     # Try to get field center or a reasonable starting position
-    field_center_x = 8.0  # Rough center of FRC field
-    field_center_y = 4.0
+    field_center_x = 8.0  # Rough center of FRC field (FIELD_LENGTH_METERS / 2)
+    field_center_y = 4.0  # Rough center of FRC field (FIELD_WIDTH_METERS / 2)
     return field_center_x, field_center_y

@@ -4,7 +4,7 @@ from PySide6.QtCore import QPoint, QSize
 import math
 import os
 import copy
-import platform
+
 from .sidebar import Sidebar
 from .sidebar.utils import clamp_from_metadata
 from models.path_model import TranslationTarget, RotationTarget, Waypoint, Path
@@ -887,10 +887,10 @@ class MainWindow(QMainWindow):
                 self._populate_load_path_menu()
             else:
                 # User cancelled, just show the empty path without saving
-                print("User cancelled path creation")
+                pass
         else:
             # No project open, just show the empty path
-            print("No project open - showing empty path")
+            pass
 
     def _action_rename_path(self):
         """Rename the currently open path file"""

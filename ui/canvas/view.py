@@ -5,10 +5,10 @@ It currently reuses many original private method names for compatibility
 with MainWindow and Sidebar interactions. Further pruning can follow.
 """
 from __future__ import annotations
-import math, os
+import math
 from typing import List, Optional, Tuple
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsItem, QFrame
-from PySide6.QtCore import Qt, QPointF, QTimer, QRect, Signal, QPoint
+from PySide6.QtCore import Qt, QPointF, QTimer, Signal, QPoint
 from PySide6.QtGui import QPainter, QPixmap, QTransform, QColor, QPen, QBrush
 
 from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
@@ -16,11 +16,24 @@ from models.simulation import simulate_path, SimResult
 
 from .constants import (
     FIELD_LENGTH_METERS, FIELD_WIDTH_METERS, CONNECT_LINE_THICKNESS_M,
-    HANDLE_DISTANCE_M, HANDLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M
+    HANDLE_DISTANCE_M, HANDLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M,
+    DEFAULT_ZOOM_FACTOR, MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR, ZOOM_STEP_FACTOR,
+    SIMULATION_UPDATE_INTERVAL_MS, SIMULATION_DEBOUNCE_INTERVAL_MS
 )
 from .items.elements import CircleElementItem, RectElementItem, RotationHandle, HandoffRadiusVisualizer
 from .items.sim import RobotSimItem
 from .components.transport import TransportControls
+
+
+def _get_translation_position(element: Any) -> Tuple[float, float]:
+    """Get the translation position (x, y) from a TranslationTarget or Waypoint element."""
+    if isinstance(element, TranslationTarget):
+        return float(element.x_meters), float(element.y_meters)
+    elif isinstance(element, Waypoint):
+        return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+    else:
+        return 0.0, 0.0
+
 
 class CanvasView(QGraphicsView):
     # Signals (mirroring original)
@@ -58,9 +71,9 @@ class CanvasView(QGraphicsView):
         self._suppress_live_events = False
         self._rotation_t_cache: Optional[dict[int,float]] = None
         self._anchor_drag_in_progress = False
-        self._zoom_factor = 1.0
-        self._min_zoom = 1.0
-        self._max_zoom = 8.0
+        self._zoom_factor = DEFAULT_ZOOM_FACTOR
+        self._min_zoom = MIN_ZOOM_FACTOR
+        self._max_zoom = MAX_ZOOM_FACTOR
         self._is_panning = False
         self._pan_start: Optional[QPoint] = None
         self.robot_length_m = ELEMENT_RECT_WIDTH_M
@@ -80,8 +93,8 @@ class CanvasView(QGraphicsView):
         self._sim_times_sorted: list[float] = []
         self._sim_total_time_s = 0.0
         self._sim_current_time_s = 0.0
-        self._sim_timer: QTimer = QTimer(self); self._sim_timer.setInterval(20); self._sim_timer.timeout.connect(self._on_sim_tick)
-        self._sim_debounce: QTimer = QTimer(self); self._sim_debounce.setSingleShot(True); self._sim_debounce.setInterval(200); self._sim_debounce.timeout.connect(self._rebuild_simulation_now)
+        self._sim_timer: QTimer = QTimer(self); self._sim_timer.setInterval(SIMULATION_UPDATE_INTERVAL_MS); self._sim_timer.timeout.connect(self._on_sim_tick)
+        self._sim_debounce: QTimer = QTimer(self); self._sim_debounce.setSingleShot(True); self._sim_debounce.setInterval(SIMULATION_DEBOUNCE_INTERVAL_MS); self._sim_debounce.timeout.connect(self._rebuild_simulation_now)
         self._sim_robot_item: Optional[RobotSimItem] = None
         self._ensure_sim_robot_item()
         self._trail_lines: List[QGraphicsLineItem] = []
@@ -326,8 +339,7 @@ class CanvasView(QGraphicsView):
     def _element_position_for_index(self, index:int)->Tuple[float,float]:
         if self._path is None or index<0 or index>=len(self._path.path_elements): return 0.0,0.0
         element=self._path.path_elements[index]
-        if isinstance(element,TranslationTarget): return float(element.x_meters), float(element.y_meters)
-        if isinstance(element,Waypoint): return float(element.translation_target.x_meters), float(element.translation_target.y_meters)
+        if isinstance(element, (TranslationTarget, Waypoint)): return _get_translation_position(element)
         if isinstance(element,RotationTarget):
             prev_pos,next_pos=self._neighbor_positions_model(index)
             if prev_pos is None or next_pos is None: return 0.0,0.0
@@ -340,13 +352,15 @@ class CanvasView(QGraphicsView):
         prev_pos=None
         for i in range(index-1,-1,-1):
             e=self._path.path_elements[i]
-            if isinstance(e,TranslationTarget): prev_pos=(float(e.x_meters),float(e.y_meters)); break
-            if isinstance(e,Waypoint): prev_pos=(float(e.translation_target.x_meters),float(e.translation_target.y_meters)); break
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                prev_pos = _get_translation_position(e)
+                break
         next_pos=None
         for i in range(index+1,len(self._path.path_elements)):
             e=self._path.path_elements[i]
-            if isinstance(e,TranslationTarget): next_pos=(float(e.x_meters),float(e.y_meters)); break
-            if isinstance(e,Waypoint): next_pos=(float(e.translation_target.x_meters),float(e.translation_target.y_meters)); break
+            if isinstance(e, (TranslationTarget, Waypoint)):
+                next_pos = _get_translation_position(e)
+                break
         return prev_pos,next_pos
 
     def _element_rotation(self, element: PathElement) -> float:
@@ -652,7 +666,7 @@ class CanvasView(QGraphicsView):
                 pdelta=event.pixelDelta();
                 if pdelta: delta_y=int(pdelta.y())
             if delta_y==0: return super().wheelEvent(event)
-            zoom_step=1.03; factor=zoom_step if delta_y>0 else (1.0/zoom_step)
+            zoom_step=ZOOM_STEP_FACTOR; factor=zoom_step if delta_y>0 else (1.0/zoom_step)
             new_zoom=self._zoom_factor*factor
             if new_zoom < self._min_zoom:
                 if self._zoom_factor <= self._min_zoom: return
@@ -776,7 +790,7 @@ class CanvasView(QGraphicsView):
                             first_item = it
                             break
                 else:
-                    if self._items:
+                    if self._items and len(self._items) > 0 and len(self._items[0]) > 1:
                         first_item = self._items[0][1]
                 # Save current styles once per overlay
                 if first_item is not None:

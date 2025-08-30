@@ -22,3 +22,16 @@ HANDLE_DISTANCE_M = 0.455
 OUTLINE_EDGE_PEN = QPen(QColor("#222222"), 0.02)
 HANDOFF_RADIUS_PEN = QPen(QColor("#FF00FF"), 0.03)
 HANDOFF_RADIUS_PEN.setStyle(Qt.DotLine)
+
+# UI and interaction constants
+DEFAULT_ZOOM_FACTOR = 1.0
+MIN_ZOOM_FACTOR = 1.0
+MAX_ZOOM_FACTOR = 8.0
+ZOOM_STEP_FACTOR = 1.03
+
+# Timer intervals (in milliseconds)
+SIMULATION_UPDATE_INTERVAL_MS = 20
+SIMULATION_DEBOUNCE_INTERVAL_MS = 200
+
+# Default field center for element positioning
+FIELD_CENTER_X_METERS = 8.0  # Rough center of FRC field
