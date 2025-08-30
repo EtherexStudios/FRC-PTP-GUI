@@ -882,9 +882,32 @@ class MainWindow(QMainWindow):
                     return
                 
                 # Save the new path
-                self.project_manager.save_path(new_path, filename)
-                # Refresh the load path menu
-                self._populate_load_path_menu()
+                saved_filename = self.project_manager.save_path(new_path, filename)
+                if saved_filename:
+                    # Force complete UI refresh after saving
+                    self._update_current_path_display()
+
+                    # Temporarily disconnect the aboutToShow signal to avoid conflicts
+                    try:
+                        self.menu_load_path.aboutToShow.disconnect(self._populate_load_path_menu)
+                    except:
+                        pass  # Signal might not be connected
+
+                    # Refresh the load path menu
+                    self._populate_load_path_menu()
+
+                    # Reconnect the aboutToShow signal
+                    try:
+                        self.menu_load_path.aboutToShow.connect(self._populate_load_path_menu)
+                    except:
+                        pass  # Signal might already be connected
+
+                    # Also refresh the recent projects menu in case it needs updating
+                    self._populate_recent_projects()
+
+                    # Ensure the menu bar gets updated
+                    if hasattr(self, 'menuBar'):
+                        self.menuBar().update()
             else:
                 # User cancelled, just show the empty path without saving
                 pass
