@@ -591,6 +591,20 @@ def simulate_path(
     first_seg = segments[0]
     start_heading_base = _default_heading(first_seg.ax, first_seg.ay, first_seg.bx, first_seg.by)
 
+    # Find the first rotation target or waypoint to use as initial heading
+    initial_rotation = None
+    for elem in path.path_elements:
+        if isinstance(elem, RotationTarget):
+            initial_rotation = float(elem.rotation_radians)
+            break
+        elif isinstance(elem, Waypoint):
+            initial_rotation = float(elem.rotation_target.rotation_radians)
+            break
+
+    # Use the first rotation target's heading if found, otherwise fall back to path direction
+    if initial_rotation is not None:
+        start_heading_base = initial_rotation
+
     # Build global rotation keyframes for rotation event ordinals and compute initial heading at s=0
     global_keyframes = _build_global_rotation_keyframes(path, anchor_path_indices, cumulative_lengths)
     initial_heading, _, _ = _desired_heading_for_global_s(global_keyframes, 0.0, start_heading_base)
