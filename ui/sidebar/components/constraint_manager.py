@@ -1065,6 +1065,13 @@ class ConstraintManager(QObject):
             self._range_sliders.clear()
             self._range_spinboxes.clear()
             self._slider_prev_values.clear()
+            # Also hide any encompassing containers so background widgets don't persist
+            for _key, container in list(self._constraint_field_containers.items()):
+                try:
+                    if container is not None:
+                        container.setVisible(False)
+                except Exception:
+                    pass
         except Exception:
             pass
             

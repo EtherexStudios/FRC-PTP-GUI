@@ -428,16 +428,22 @@ class ProjectManager:
             # Load constraints block if present
             constraints_block = data.get("constraints", {}) or {}
             if isinstance(constraints_block, dict) and hasattr(path, 'constraints') and path.constraints is not None:
-                for name in [
-                    "default_max_velocity_meters_per_sec",
-                    "default_max_acceleration_meters_per_sec2",
-                    "default_end_translation_tolerance_meters",
-                    "default_max_velocity_deg_per_sec",
-                    "default_max_acceleration_deg_per_sec2",
-                    "default_end_rotation_tolerance_deg",
-                ]:
-                    if name in constraints_block:
-                        setattr(path.constraints, name, self._opt_float(constraints_block.get(name)))
+                # Accept canonical flat keys from saved paths and fallback to legacy default_* keys
+                flat_keys = [
+                    "max_velocity_meters_per_sec",
+                    "max_acceleration_meters_per_sec2",
+                    "end_translation_tolerance_meters",
+                    "max_velocity_deg_per_sec",
+                    "max_acceleration_deg_per_sec2",
+                    "end_rotation_tolerance_deg",
+                ]
+                for key in flat_keys:
+                    if key in constraints_block:
+                        setattr(path.constraints, key, self._opt_float(constraints_block.get(key)))
+                    else:
+                        legacy = f"default_{key}"
+                        if legacy in constraints_block:
+                            setattr(path.constraints, key, self._opt_float(constraints_block.get(legacy)))
             # Defer ranged constraints parsing until after path elements are loaded
             # Unify: allow ranged constraints to be provided under constraints[key] as a list
             ranged_block_list: List[Dict[str, Any]] = []
