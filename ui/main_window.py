@@ -275,7 +275,16 @@ class MainWindow(QMainWindow):
                     background: #3b3b3b;
                 }
                 QMenu::indicator {
-                    background: transparent;
+                    width: 6px;
+                    height: 6px;
+                    margin-right: 10px;
+                    margin-left: 4px;
+                }
+                QMenu::item {
+                    padding-right: 15px;
+                }
+                QMenu::item:selected {
+                    background: #555555;
                 }
                 """
             )

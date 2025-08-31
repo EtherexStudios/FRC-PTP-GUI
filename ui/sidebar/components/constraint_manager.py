@@ -183,12 +183,12 @@ class ConstraintManager(QObject):
             
         self.constraintAdded.emit(key, value)
         return True
-        
+
     def remove_constraint(self, key: str) -> bool:
         """Remove a path-level constraint."""
         if self.path is None or not hasattr(self.path, 'constraints'):
             return False
-            
+
         if key in NON_RANGED_CONSTRAINT_KEYS:
             # Remove flat constraint only
             try:

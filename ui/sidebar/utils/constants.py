@@ -110,14 +110,14 @@ DEGREES_TO_RADIANS_ATTR_MAP = {
 
 # Path constraint keys
 PATH_CONSTRAINT_KEYS = [
-    # Non-ranged first for clarity in optional add menu
-    'end_translation_tolerance_meters',
-    'end_rotation_tolerance_deg',
     # Ranged-capable constraints
     'max_velocity_meters_per_sec',
     'max_acceleration_meters_per_sec2',
     'max_velocity_deg_per_sec',
     'max_acceleration_deg_per_sec2',
+    # Non-ranged constraints
+    'end_translation_tolerance_meters',
+    'end_rotation_tolerance_deg',
 ]
 
 # Subset of constraint keys that are always stored as flat (non-ranged) values

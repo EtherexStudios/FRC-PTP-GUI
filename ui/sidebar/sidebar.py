@@ -10,7 +10,64 @@ from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QSize
 from PySide6.QtGui import QIcon
 from models.path_model import Path, TranslationTarget, RotationTarget, Waypoint
 
-from .widgets import CustomList, PopupCombobox
+
+class PersistentScrollArea(QScrollArea):
+    """A QScrollArea that automatically remembers and restores its scroll position."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_scroll_value = 0
+        self._suppress_scroll_events = False
+        self._preserve_scroll = False
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+
+    def _on_scroll_changed(self, value):
+        """Remember the scroll position when it changes."""
+        if not self._suppress_scroll_events:
+            self._last_scroll_value = value
+            # print(f"PersistentScrollArea: Scroll position changed to {value}")
+
+    def set_scroll_preserved_widget(self, widget):
+        """Set the widget and preserve scroll position."""
+        current_scroll = self.verticalScrollBar().value()
+        self.setWidget(widget)
+        # Restore scroll position after setting widget
+        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(current_scroll))
+
+    def begin_scroll_preservation(self):
+        """Start preserving scroll position during bulk operations."""
+        self._preserve_scroll = True
+        self._last_scroll_value = self.verticalScrollBar().value()
+        # print(f"PersistentScrollArea: Beginning scroll preservation at {self._last_scroll_value}")
+
+    def end_scroll_preservation(self):
+        """End scroll preservation and restore position."""
+        self._preserve_scroll = False
+        self.restore_scroll_position()
+
+    def restore_scroll_position(self):
+        """Restore the remembered scroll position."""
+        if hasattr(self, '_last_scroll_value'):
+            current_value = self.verticalScrollBar().value()
+            if current_value != self._last_scroll_value:
+                # print(f"PersistentScrollArea: Restoring scroll from {current_value} to {self._last_scroll_value}")
+                self._suppress_scroll_events = True
+                self.verticalScrollBar().setValue(self._last_scroll_value)
+                self._suppress_scroll_events = False
+                # Force another restoration in case Qt overrides it
+                QTimer.singleShot(0, lambda: self._force_restore_scroll())
+                return True
+        return False
+
+    def _force_restore_scroll(self):
+        """Force restore scroll position after a delay."""
+        if hasattr(self, '_last_scroll_value') and not self._preserve_scroll:
+            current_value = self.verticalScrollBar().value()
+            if current_value != self._last_scroll_value:
+                # print(f"PersistentScrollArea: Force restoring scroll from {current_value} to {self._last_scroll_value}")
+                self.verticalScrollBar().setValue(self._last_scroll_value)
+
+from .widgets import CustomList, PersistentCustomList, PopupCombobox
 from .components import ElementManager, ConstraintManager, PropertyEditor
 from .utils import ElementType, SPINNER_METADATA, PATH_CONSTRAINT_KEYS
 
@@ -45,6 +102,8 @@ class Sidebar(QWidget):
         self._ready: bool = False
         # Track last selected index for restoration when paths are reloaded
         self._last_selected_index: int = 0
+
+
         
         # Initialize components
         self.element_manager = ElementManager(self)
@@ -64,6 +123,8 @@ class Sidebar(QWidget):
         
         # Mark as ready
         self.mark_ready()
+
+
         
     def _setup_ui(self):
         """Set up the UI layout and widgets."""
@@ -81,7 +142,7 @@ class Sidebar(QWidget):
         self._create_path_elements_bar(main_layout)
         
         # Elements list
-        self.points_list = CustomList()
+        self.points_list = PersistentCustomList()
         # Set size policy to prevent unwanted expansion
         self.points_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # Set a reasonable fixed height to prevent it from expanding/contracting
@@ -305,7 +366,7 @@ class Sidebar(QWidget):
         parent_layout.addWidget(self.constraints_title_bar)
 
         # Constraints form container (wrapped in scroll area)
-        self.constraints_scroll = QScrollArea()
+        self.constraints_scroll = PersistentScrollArea()
         self.constraints_scroll.setWidgetResizable(True)
         self.constraints_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         try:
@@ -428,8 +489,30 @@ class Sidebar(QWidget):
             self.constraint_manager.clear_active_preview()
         except Exception:
             pass
+
+        # Capture scroll positions before any changes
+        points_scroll_pos = self.points_list.verticalScrollBar().value()
+        constraints_scroll_pos = self.constraints_scroll.verticalScrollBar().value()
+
         # Defer selection to avoid re-entrancy during fullscreen/layout changes
-        QTimer.singleShot(0, lambda i=index: self.points_list.setCurrentRow(i))
+        # Disable auto-scrolling to preserve user's scroll position
+        self.points_list.disable_auto_scroll_temporarily()
+
+        def do_selection_and_restore(i, pts_scroll, const_scroll):
+            self.points_list.setCurrentRow(i)
+            self.points_list.enable_auto_scroll()
+            # Restore scroll positions after Qt has finished processing the selection
+            QTimer.singleShot(20, lambda: (
+                self.points_list.verticalScrollBar().setValue(pts_scroll),
+                self.constraints_scroll.verticalScrollBar().setValue(const_scroll)
+            ))
+            # Additional restoration as backup in case the first one is overridden
+            QTimer.singleShot(100, lambda: (
+                self.points_list.verticalScrollBar().setValue(pts_scroll),
+                self.constraints_scroll.verticalScrollBar().setValue(const_scroll)
+            ))
+
+        QTimer.singleShot(0, lambda: do_selection_and_restore(index, points_scroll_pos, constraints_scroll_pos))
 
     def _check_and_swap_rotation_targets(self):
         """Compatibility shim: call ElementManager rotation ordering logic.
@@ -501,8 +584,12 @@ class Sidebar(QWidget):
             
     def rebuild_points_list(self):
         """Rebuild the elements list widget."""
+        # Capture scroll position before any changes
+        points_scroll_pos = self.points_list.verticalScrollBar().value()
+        constraints_scroll_pos = self.constraints_scroll.verticalScrollBar().value()
+
         self.hide_spinners()
-        
+
         # Remove and delete any existing row widgets to prevent visual artifacts
         try:
             self.points_list.blockSignals(True)
@@ -513,10 +600,10 @@ class Sidebar(QWidget):
                     self.points_list.removeItemWidget(item)
                     w.deleteLater()
             self.points_list.clear()
-            
+
             # Rebuild add-element dropdown items based on selection context
             self._refresh_add_dropdown_items()
-            
+
             if self.path:
                 for i, p in enumerate(self.path.path_elements):
                     if isinstance(p, TranslationTarget):
@@ -531,7 +618,7 @@ class Sidebar(QWidget):
                     # Use an empty QListWidgetItem and render all visuals via a row widget
                     item = QListWidgetItem("")
                     item.setData(Qt.UserRole, i)
-                    
+
                     # Build row widget with label and remove button
                     row_widget = QWidget()
                     row_layout = QHBoxLayout(row_widget)
@@ -541,7 +628,7 @@ class Sidebar(QWidget):
                     label.setStyleSheet("color: #f0f0f0;")
                     row_layout.addWidget(label)
                     row_layout.addStretch()
-                    
+
                     remove_btn = QPushButton()
                     remove_btn.setIcon(QIcon("assets/remove_icon.png"))
                     remove_btn.setToolTip("Remove element")
@@ -558,6 +645,18 @@ class Sidebar(QWidget):
                     self.points_list.setItemWidget(item, row_widget)
         finally:
             self.points_list.blockSignals(False)
+
+        # Force restore scroll positions multiple times to overcome Qt's automatic adjustments
+        def restore_scrolls():
+            self.points_list.verticalScrollBar().setValue(points_scroll_pos)
+            self.constraints_scroll.verticalScrollBar().setValue(constraints_scroll_pos)
+
+        # Restore immediately
+        restore_scrolls()
+
+        # And restore again after a short delay to overcome any deferred Qt adjustments
+        QTimer.singleShot(10, restore_scrolls)
+        QTimer.singleShot(50, restore_scrolls)
             
     def on_item_selected(self):
         """Handle selection of an element in the list."""
@@ -565,43 +664,45 @@ class Sidebar(QWidget):
             # Guard against re-entrancy and layout instability
             if getattr(self, '_suspended', False) or not getattr(self, '_ready', False):
                 return
-            
+
+
+
             idx = self.get_selected_index()
             if idx is None or self.path is None:
                 self.hide_spinners()
                 return
-                
+
             # Clear any active ranged preview when selecting a list element
             try:
                 self.constraint_manager.clear_active_preview()
             except Exception:
                 pass
-            
+
             # Store the selected index for restoration when paths are reloaded
             self._last_selected_index = idx
-            
+
             # Validate index bounds
             if idx < 0 or idx >= len(self.path.path_elements):
                 self.hide_spinners()
                 return
-            
+
             # Safely get element
             try:
                 element = self.path.get_element(idx)
             except (IndexError, RuntimeError):
                 self.hide_spinners()
                 return
-            
+
             # Clear and hide existing UI
             self.optional_pop.clear()
             self.hide_spinners()
-            
+
             # Expose element properties
             try:
                 self._expose_element(element)
             except (RuntimeError, AttributeError):
                 return
-            
+
             # Determine element type safely
             try:
                 if isinstance(element, TranslationTarget):
@@ -612,19 +713,19 @@ class Sidebar(QWidget):
                     current_type = ElementType.WAYPOINT
             except RuntimeError:
                 return
-            
+
             # Rebuild type combo
             try:
                 self._rebuild_type_combo_for_index(idx, current_type)
             except (RuntimeError, AttributeError):
                 pass
-            
+
             # Refresh add-element options
             try:
                 self._refresh_add_dropdown_items()
             except (RuntimeError, AttributeError):
                 pass
-            
+
             # Show controls
             try:
                 for widget in (self.type_label, self.type_combo, self.form_container, self.title_bar, self.constraints_title_bar, self.constraints_form_container):
@@ -632,7 +733,10 @@ class Sidebar(QWidget):
                         widget.setVisible(True)
             except (RuntimeError, AttributeError):
                 pass
-                
+
+            # Note: Scroll position restoration is handled by calling methods (like on_constraint_added)
+            # to avoid conflicts between multiple restoration attempts
+
         except Exception as e:
             # Fail safe: keep UI alive
             self.hide_spinners()
@@ -656,7 +760,7 @@ class Sidebar(QWidget):
         
         # Update optional dropdown with all items
         if all_optional_items:
-            all_optional_items = sorted(list(dict.fromkeys(all_optional_items)))
+            all_optional_items = list(dict.fromkeys(all_optional_items))
             self.optional_pop.clear()
             self.optional_pop.add_items(all_optional_items)
         else:
@@ -664,28 +768,31 @@ class Sidebar(QWidget):
             
     def _expose_path_constraints(self):
         """Show path-level constraints."""
+        # Capture constraints scroll position before rebuilding
+        constraints_scroll_pos = self.constraints_scroll.verticalScrollBar().value()
+
         optional_display_items = []
         has_constraints = False
-        
+
         if self.path is not None:
             # Ensure constraints object exists
             if not hasattr(self.path, 'constraints') or self.path.constraints is None:
                 from models.path_model import Constraints
                 self.path.constraints = Constraints()
-                
+
             # Helper: sanitize labels for menu display (strip HTML line breaks)
             def _menu_label_for_key(key: str) -> str:
                 meta = SPINNER_METADATA.get(key, {})
                 return meta.get('label', key).replace('<br/>', ' ')
-                
+
             for key in PATH_CONSTRAINT_KEYS:
                 # Check if constraint is present
                 has_constraint = self.constraint_manager.has_constraint(key)
                 constraint_value = self.constraint_manager.get_constraint_value(key)
-                
+
                 if has_constraint and key in self.spinners:
                     control, label, btn, spin_row = self.spinners[key]
-                    
+
                     # Set value
                     try:
                         control.blockSignals(True)
@@ -693,14 +800,14 @@ class Sidebar(QWidget):
                         control.setValue(float(value))
                     finally:
                         control.blockSignals(False)
-                        
+
                     # Show controls
                     label.setVisible(True)
                     spin_row.setVisible(True)
                     has_constraints = True
-                    
-                    # Create range slider for applicable constraints
-                    if key in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2', 
+
+                                        # Create range slider for applicable constraints
+                    if key in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2',
                               'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'):
                         self.constraint_manager.create_range_slider_for_key(
                             key, control, spin_row, label, self.constraints_layout
@@ -710,20 +817,12 @@ class Sidebar(QWidget):
                     optional_display_items.append(display)
                     self.property_editor.optional_display_to_key[display] = key
 
-                # For ranged-capable constraints, only provide (+) if we can add more instances
-                if key in ('max_velocity_meters_per_sec', 'max_acceleration_meters_per_sec2',
-                           'max_velocity_deg_per_sec', 'max_acceleration_deg_per_sec2'):
-                    try:
-                        can_more = self.constraint_manager.can_add_more_instances(key)
-                    except Exception:
-                        can_more = True
-                    if can_more:
-                        add_more_label = _menu_label_for_key(key) + ' (+)'
-                        # Avoid duplicate entry if already added in this pass
-                        if add_more_label not in optional_display_items:
-                            optional_display_items.append(add_more_label)
-                            self.property_editor.optional_display_to_key[add_more_label] = key
-                    
+
+
+
+        # Force restore constraints scroll position after rebuilding
+        self.constraints_scroll.verticalScrollBar().setValue(constraints_scroll_pos)
+
         # Return optional items list
         return optional_display_items
             
@@ -918,26 +1017,40 @@ class Sidebar(QWidget):
         idx = self.get_selected_index()
         if idx is None or self.path is None:
             return
-            
+
+        # Capture scroll positions before attribute removal
+        points_scroll_pos = self.points_list.verticalScrollBar().value()
+        constraints_scroll_pos = self.constraints_scroll.verticalScrollBar().value()
+
         element = self.path.get_element(idx)
         label_text = SPINNER_METADATA.get(key, {}).get('label', key).replace('<br/>', ' ')
         desc = f"Remove {label_text}"
-        
+
         try:
             self.aboutToChange.emit(desc)
         except Exception:
             pass
-            
+
         # Check if it's a path constraint
         if key in PATH_CONSTRAINT_KEYS:
             self.constraint_manager.remove_constraint(key)
         else:
             # Set property to None
             self.property_editor.set_property_value(key, None, element)
-            
+
         self.on_item_selected()
         self.modelChanged.emit()
-        
+
+        # Force restore scroll positions after attribute removal
+        def restore_scrolls():
+            self.points_list.verticalScrollBar().setValue(points_scroll_pos)
+            self.constraints_scroll.verticalScrollBar().setValue(constraints_scroll_pos)
+
+        # Restore immediately and after a delay
+        restore_scrolls()
+        QTimer.singleShot(50, restore_scrolls)
+        QTimer.singleShot(150, restore_scrolls)
+
         try:
             self.userActionOccurred.emit(desc)
         except Exception:
@@ -947,27 +1060,41 @@ class Sidebar(QWidget):
         """Handle adding a path constraint."""
         if self.path is None:
             return
-            
+
+        # Capture scroll positions before constraint addition
+        points_scroll_pos = self.points_list.verticalScrollBar().value()
+        constraints_scroll_pos = self.constraints_scroll.verticalScrollBar().value()
+
         # Translate display name back to actual key if needed
         real_key = self.property_editor.optional_display_to_key.get(key, key)
         # If user selected a "+" variant manually entered, strip it
         if real_key.endswith(' (+)') and real_key not in self.property_editor.optional_display_to_key:
             real_key = real_key.replace(' (+)', '')
-        
+
         label_text = SPINNER_METADATA.get(real_key, {}).get('label', real_key).replace('<br/>', ' ')
-        
+
         try:
             self.aboutToChange.emit(f"Add {label_text}")
         except Exception:
             pass
-        
+
         # Add constraint via manager
         self.constraint_manager.add_constraint(real_key)
-        
+
         # Refresh UI
         self.refresh_current_selection()
         self.modelChanged.emit()
-        
+
+        # Force restore scroll positions after constraint addition
+        def restore_scrolls():
+            self.points_list.verticalScrollBar().setValue(points_scroll_pos)
+            self.constraints_scroll.verticalScrollBar().setValue(constraints_scroll_pos)
+
+        # Restore immediately and after a delay
+        restore_scrolls()
+        QTimer.singleShot(50, restore_scrolls)
+        QTimer.singleShot(150, restore_scrolls)
+
         try:
             self.userActionOccurred.emit(f"Add {label_text}")
         except Exception:
