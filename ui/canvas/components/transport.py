@@ -64,8 +64,8 @@ class TransportControls:
 
         slider = QSlider(Qt.Horizontal)
         slider.setRange(0,0)
-        slider.setSingleStep(10)
-        slider.setPageStep(100)
+        slider.setSingleStep(1)  # Fine control: 1ms steps
+        slider.setPageStep(10)  # Fine page control: 10ms steps
         # Style slider to be cleaner and closer to sidebar range visuals
         try:
             slider.setStyleSheet(
