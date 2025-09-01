@@ -1,0 +1,7 @@
+---
+description: terminal command for running project
+globs: main.py
+alwaysApply: true
+---
+
+Command : cd /Users/edan/FRC/FRC-PTP-GUI && python main.py

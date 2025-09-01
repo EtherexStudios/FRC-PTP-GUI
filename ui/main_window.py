@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog, QToolBar, QToolButton, QApplication, QFrame, QSizePolicy
+from PySide6.QtWidgets import QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMenuBar, QMenu, QDialog, QToolBar, QToolButton, QApplication, QFrame, QSizePolicy, QLabel
 from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap, QPainter, QPolygon, QPen, QBrush, QColor
 from PySide6.QtCore import QPoint, QSize
 import math
@@ -134,6 +134,31 @@ class MainWindow(QMainWindow):
         self.statusBar = self.statusBar()
         self.statusBar.showMessage("No path loaded")
 
+        # Create autosave status widget in status bar (right side)
+        self.autosave_status_widget = QLabel("Saved")
+        self.autosave_status_widget.setStyleSheet("""
+            QLabel {
+                background-color: #2a2a2a;
+                color: #7fb97f;
+                border: 1px solid #5fa85f;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 10px;
+                font-weight: 500;
+                margin-right: 5px;
+            }
+        """)
+        self.autosave_status_widget.setFixedSize(85, 20)
+        self.autosave_status_widget.setAlignment(Qt.AlignCenter)
+        self.statusBar.addPermanentWidget(self.autosave_status_widget, stretch=0)
+
+        # Add autosave activity indicator to status bar (left side)
+        self.autosave_indicator = QLabel("💾")
+        self.autosave_indicator.setToolTip("Autosave active")
+        self.autosave_indicator.setVisible(False)
+        self.autosave_indicator.setStyleSheet("color: #666666; font-size: 12px; margin-left: 5px;")
+        self.statusBar.addWidget(self.autosave_indicator)
+
         # Startup: load last project or prompt
         QTimer.singleShot(0, self._startup_load)
 
@@ -172,6 +197,8 @@ class MainWindow(QMainWindow):
                     pass
             QTimer.singleShot(1000, _clear)
         super().changeEvent(event)
+
+
 
     def eventFilter(self, obj, event):
         try:
@@ -677,16 +704,19 @@ class MainWindow(QMainWindow):
         self.canvas.refresh_from_model()
         self.canvas.update_handoff_radius_visualizers()
         self.canvas.request_simulation_rebuild()
-        
+
         # Refresh sidebar
         self.sidebar.set_path(self.path)
         self.sidebar.refresh_current_selection()
-        
+
         # Apply config changes to canvas
         self._apply_robot_dims_from_config(self.project_manager.config)
-        
+
         # Update path display
         self._update_current_path_display()
+
+        # Trigger autosave after undo/redo since the path has changed
+        self._schedule_autosave()
     
     def _record_path_change(self, description: str, old_path: Path = None):
         """Record a path change in the undo system."""
@@ -1379,9 +1409,119 @@ class MainWindow(QMainWindow):
     def _schedule_autosave(self):
         # Coalesce frequent updates
         self._autosave_timer.start()
+        # Show autosave indicator
+        self._show_autosave_indicator()
 
     def _do_autosave(self):
         # Ensure project dir exists before saving
         if not self.project_manager.has_valid_project():
+            self._hide_autosave_indicator()
+            self._show_autosave_feedback("Autosave skipped: No valid project", error=True)
             return
-        self.project_manager.save_path(self.path)
+
+        try:
+            result = self.project_manager.save_path(self.path)
+            if result is not None:
+                # Autosave successful
+                self._hide_autosave_indicator()
+                self._show_autosave_feedback("Autosaved successfully", error=False)
+            else:
+                # Autosave failed
+                self._hide_autosave_indicator()
+                self._show_autosave_feedback("Autosave failed: Could not save path", error=True)
+        except Exception as e:
+            # Autosave failed with exception
+            self._hide_autosave_indicator()
+            self._show_autosave_feedback(f"Autosave failed: {str(e)}", error=True)
+
+    def _show_autosave_indicator(self):
+        """Show the autosave status indicator and update status widget."""
+        # Update status bar indicator
+        self.autosave_indicator.setVisible(True)
+        self.autosave_indicator.setStyleSheet("color: #d4a76a; font-size: 12px; margin-left: 5px;")
+        self.autosave_indicator.setToolTip("Autosave in progress...")
+
+        # Update status widget to saving state
+        self.autosave_status_widget.setText("💾 Saving...")
+        self.autosave_status_widget.setStyleSheet("""
+            QLabel {
+                background-color: #3a2a1a;
+                color: #d4a76a;
+                border: 1px solid #c47a2d;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 10px;
+                font-weight: 500;
+                margin-right: 5px;
+            }
+        """)
+        self.autosave_status_widget.setAlignment(Qt.AlignCenter)
+
+    def _hide_autosave_indicator(self):
+        """Hide the autosave status indicator and reset status widget."""
+        # Hide status bar indicator
+        self.autosave_indicator.setVisible(False)
+
+        # Reset permanent status widget
+        self._reset_autosave_status()
+
+    def _show_autosave_feedback(self, message: str, error: bool = False):
+        """Update the permanent autosave status widget.
+
+        Args:
+            message: The feedback message to display
+            error: True if this is an error message, False for success
+        """
+        if error:
+            # Show error state
+            self.autosave_status_widget.setText("❌ Error")
+            self.autosave_status_widget.setStyleSheet("""
+                QLabel {
+                    background-color: #3a1a1a;
+                    color: #c66b6b;
+                    border: 1px solid #b33d3d;
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-size: 10px;
+                    font-weight: 500;
+                    margin-right: 5px;
+                }
+            """)
+            self.autosave_status_widget.setAlignment(Qt.AlignCenter)
+            # Auto-reset to saved state after 2 seconds
+            QTimer.singleShot(2000, self._reset_autosave_status)
+        else:
+            # Show success state (brief confirmation)
+            self.autosave_status_widget.setText("✅ Saved")
+            self.autosave_status_widget.setStyleSheet("""
+                QLabel {
+                    background-color: #1a3a1a;
+                    color: #7fb97f;
+                    border: 1px solid #5fa85f;
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-size: 10px;
+                    font-weight: 500;
+                    margin-right: 5px;
+                }
+            """)
+            self.autosave_status_widget.setAlignment(Qt.AlignCenter)
+            # Auto-reset to saved state after 1 second
+            QTimer.singleShot(1000, self._reset_autosave_status)
+
+    def _reset_autosave_status(self):
+        """Reset the autosave status widget to saved state."""
+        self.autosave_status_widget.setText("Saved")
+        self.autosave_status_widget.setStyleSheet("""
+            QLabel {
+                background-color: #2a2a2a;
+                color: #7fb97f;
+                border: 1px solid #5fa85f;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 10px;
+                font-weight: 500;
+                margin-right: 5px;
+            }
+        """)
+        self.autosave_status_widget.setAlignment(Qt.AlignCenter)
