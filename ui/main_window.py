@@ -1525,3 +1525,6 @@ class MainWindow(QMainWindow):
             }
         """)
         self.autosave_status_widget.setAlignment(Qt.AlignCenter)
+
+        # Ensure the current path display is up to date after autosave feedback
+        QTimer.singleShot(0, self._update_current_path_display)
