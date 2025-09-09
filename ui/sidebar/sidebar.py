@@ -69,7 +69,7 @@ class PersistentScrollArea(QScrollArea):
 
 from .widgets import CustomList, PersistentCustomList, PopupCombobox
 from .components import ElementManager, ConstraintManager, PropertyEditor
-from .utils import ElementType, SPINNER_METADATA, PATH_CONSTRAINT_KEYS
+from .utils import ElementType, SPINNER_METADATA, PATH_CONSTRAINT_KEYS, NON_RANGED_CONSTRAINT_KEYS
 
 
 class Sidebar(QWidget):
@@ -812,6 +812,12 @@ class Sidebar(QWidget):
                         self.constraint_manager.create_range_slider_for_key(
                             key, control, spin_row, label, self.constraints_layout
                         )
+
+                    # Add this new if block after the range slider creation
+                    if key not in NON_RANGED_CONSTRAINT_KEYS and self.constraint_manager.can_add_more_instances(key):
+                        display = _menu_label_for_key(key) + " (+)"
+                        optional_display_items.append(display)
+                        self.property_editor.optional_display_to_key[display] = key
                 else:
                     display = _menu_label_for_key(key)
                     optional_display_items.append(display)
