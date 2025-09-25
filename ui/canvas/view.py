@@ -9,11 +9,10 @@ import math
 from typing import List, Optional, Tuple
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsItem, QFrame
 from PySide6.QtCore import Qt, QPointF, QTimer, Signal, QPoint
-from PySide6.QtGui import QPainter, QPixmap, QTransform, QColor, QPen, QBrush
+from PySide6.QtGui import QPainter, QPixmap, QTransform, QColor, QPen, QBrush, QPixmapCache
 
 from models.path_model import Path, PathElement, TranslationTarget, RotationTarget, Waypoint
 from models.simulation import simulate_path, SimResult
-
 from .constants import (
     FIELD_LENGTH_METERS, FIELD_WIDTH_METERS, CONNECT_LINE_THICKNESS_M,
     HANDLE_DISTANCE_M, HANDLE_RADIUS_M, ELEMENT_RECT_WIDTH_M, ELEMENT_RECT_HEIGHT_M,
@@ -86,7 +85,7 @@ class CanvasView(QGraphicsView):
         self._items: List[Tuple[str, RectElementItem, Optional[RotationHandle]]] = []
         self._connect_lines: List[QGraphicsLineItem] = []
         self._handoff_visualizers: List[Optional[HandoffRadiusVisualizer]] = []
-        self._load_field_background("assets/field25.png")
+        self._load_field_background(":/assets/field25.png")
         # Simulation state
         self._sim_result: Optional[SimResult] = None
         self._sim_poses_by_time: dict[float, tuple[float,float,float]] = {}

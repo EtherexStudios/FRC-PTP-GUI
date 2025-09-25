@@ -630,7 +630,7 @@ class Sidebar(QWidget):
                     row_layout.addStretch()
 
                     remove_btn = QPushButton()
-                    remove_btn.setIcon(QIcon("assets/remove_icon.png"))
+                    remove_btn.setIcon(QIcon(":/assets/remove_icon.png"))
                     remove_btn.setToolTip("Remove element")
                     remove_btn.setFixedSize(18, 18)
                     remove_btn.setIconSize(QSize(14, 14))

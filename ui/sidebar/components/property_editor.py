@@ -86,7 +86,7 @@ class PropertyEditor(QObject):
             btn.setFixedSize(16, 16)
             btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")
             if data.get('removable', True):
-                btn.setIcon(QIcon("assets/remove_icon.png"))
+                btn.setIcon(QIcon(":/assets/remove_icon.png"))
                 btn.clicked.connect(lambda checked=False, n=name: self._on_property_removed(n))
             else:
                 btn.setIcon(QIcon())

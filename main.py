@@ -6,6 +6,7 @@ gc.disable()
 
 import sys
 from PySide6.QtWidgets import QApplication
+import assets_rc  # noqa: F401  Ensure Qt resources are registered
 from ui.main_window import MainWindow  # Import your class
 
 app = QApplication(sys.argv)

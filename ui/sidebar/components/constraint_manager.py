@@ -665,7 +665,7 @@ class ConstraintManager(QObject):
                 # Remove instance button
                 remove_btn = QPushButton()
                 try:
-                    remove_btn.setIcon(QIcon("assets/remove_icon.png"))
+                    remove_btn.setIcon(QIcon(":/assets/remove_icon.png"))
                     remove_btn.setFixedSize(16, 16)
                     remove_btn.setIconSize(QSize(14, 14))
                     remove_btn.setStyleSheet("QPushButton { border: none; } QPushButton:hover { background: #555; border-radius: 3px; }")

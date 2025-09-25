@@ -17,7 +17,7 @@ class PopupCombobox(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         self.button = QPushButton("Add property")
-        self.button.setIcon(QIcon("assets/add_icon.png"))
+        self.button.setIcon(QIcon(":/assets/add_icon.png"))
         self.button.setIconSize(QSize(16, 16))
         self.button.setToolTip("Add an optional property")
         self.button.setStyleSheet("QPushButton { border: none; padding: 2px 6px; margin-left: 8px; }")

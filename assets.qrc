@@ -1,0 +1,9 @@
+<RCC version="1.0">
+    <qresource prefix="/assets">
+        <file alias="field25.png">assets/field25.png</file>
+        <file alias="add_icon.png">assets/add_icon.png</file>
+        <file alias="remove_icon.png">assets/remove_icon.png</file>
+        <file alias="rebel_logo.png">assets/rebel_logo.png</file>
+    </qresource>
+</RCC>
+
